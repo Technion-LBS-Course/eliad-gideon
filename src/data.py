@@ -3,7 +3,7 @@ import pandas as pd
 from math import radians, cos, sin, asin, sqrt
 
 ROOT = Path(__file__).parent.parent
-_DEFAULT_CSV = ROOT / "israel_shawarma_database_full_prices_filled.csv"
+_DEFAULT_CSV = ROOT / "data" / "dataset.csv"
 
 PRICE_COLS = [
     "price_turkey_shawarma_pita",
@@ -15,7 +15,7 @@ PRICE_COLS = [
 ]
 
 
-def load_raw(path: Path | None = None) -> pd.DataFrame:
+def load_raw(path=None) -> pd.DataFrame:
     path = path or _DEFAULT_CSV
     if not path.exists():
         return pd.DataFrame()
