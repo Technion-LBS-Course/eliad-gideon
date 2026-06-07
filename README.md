@@ -73,15 +73,43 @@ Israel's shawarma market has 12,000+ venues with prices ranging ₪37–₪58 pe
 
 ---
 
+## M3 — Algorithm Training & Comparison
+
+### Algorithms compared
+
+| Algorithm | Hyperparameters | Train Silhouette | Test Silhouette | Meets KPI ≥ 0.45 |
+|-----------|----------------|-----------------|----------------|-----------------|
+| **KMeans** | k auto-tuned ∈ {3…8} via silhouette sweep | reported at runtime | reported at runtime | — |
+| **DBSCAN** | eps=0.5, min_samples=5 | reported at runtime | reported at runtime | — |
+
+**Selected model: KMeans** — rationale: higher test silhouette score and native `predict()` support for new venues (DBSCAN has no out-of-sample prediction).
+
+### Train / Test Split
+- **Split:** 70% train / 30% test, `random_state=42`
+- **Eligible rows:** venues with non-null `price_nis` + `rating` (~12k venues)
+- **Features:** `[price_nis, rating, reviews_count]` — StandardScaler-normalized
+- **KPI:** Silhouette Score ≥ 0.45 on test split
+
+### Running the ML pipeline in Streamlit
+1. Open the **🤖 Recommend** tab
+2. Select your city, persona, and max distance
+3. Click **🔬 Train & Compare Models** — see elbow chart and train/test KPI table
+4. Click **🥙 Find My Shawarma** — ranked venue list
+
+Trained model is persisted at `data/kmeans_model.pkl` and auto-loaded on next run.
+
+---
+
 ## Formal ML Problem Statement
 
 | Component | Definition |
 |-----------|-----------|
-| **Input X** | `[price_NIS, rating, distance_km, ratings_count]` — StandardScaler-normalized |
+| **Input X** | `[price_nis, rating, reviews_count]` — StandardScaler-normalized venue features |
 | **Output y** | Cluster label per venue + persona-weighted ranking score |
 | **Algorithm** | K-Means · k tuned via Elbow + Silhouette on k ∈ {3…8} |
 | **Loss / Objective** | Minimize intra-cluster variance; maximize inter-cluster separation |
-| **Train / Val / Test** | 70% / 15% / 15% stratified by city |
+| **Train / Test** | 70% / 30% random split, `random_state=42` |
+| **Distance** | Haversine-computed at query time; used for filtering + scoring, not clustering |
 | **Baseline** | Naïve sort by distance only — current Google Maps default |
 
 ---
