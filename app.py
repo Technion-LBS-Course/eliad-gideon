@@ -1,12 +1,10 @@
-import pickle
-from pathlib import Path
-
+import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
-from src.data import build_features, load_raw, clean
-from src.model import predict, train
+from src.data import load_raw, clean
+from src.model import compare_algorithms, load_model, predict, save_model, train_agglomerative
 
 st.set_page_config(page_title="Appetite Engineering", layout="wide", page_icon="🥙")
 
@@ -26,29 +24,6 @@ def get_data() -> pd.DataFrame:
 
 
 df_all = get_data()
-
-MODEL_DIR = Path(__file__).parent / "models"
-MODEL_PATH = MODEL_DIR / "kmeans_model.pkl"
-SCALER_PATH = MODEL_DIR / "scaler.pkl"
-DEFAULT_LAT = 31.5
-DEFAULT_LNG = 34.9
-
-@st.cache_resource(show_spinner="Loading model…")
-def get_model():
-    if MODEL_PATH.exists() and SCALER_PATH.exists():
-        with open(MODEL_PATH, "rb") as handle:
-            model = pickle.load(handle)
-        with open(SCALER_PATH, "rb") as handle:
-            scaler = pickle.load(handle)
-        return model, scaler
-
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    model, scaler, _ = train(build_features(df_all, DEFAULT_LAT, DEFAULT_LNG), k=5)
-    with open(MODEL_PATH, "wb") as handle:
-        pickle.dump(model, handle)
-    with open(SCALER_PATH, "wb") as handle:
-        pickle.dump(scaler, handle)
-    return model, scaler
 
 # ── Sidebar — applies to EDA tab ───────────────────────────────
 with st.sidebar:
@@ -79,7 +54,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📚 Literature & Market",
     "📊 EDA",
     "🏆 KPI & Model",
-    "🎯 Recommendation",
+    "🤖 Recommend",
 ])
 
 
@@ -472,89 +447,162 @@ with tab4:
     }
     st.dataframe(pd.DataFrame(risk_data), use_container_width=True, hide_index=True)
 
-    model, scaler = get_model()
-    st.divider()
-    st.subheader("Recommendation Model Status")
-    st.markdown(
-        "This app uses a trained K-Means model on venue attributes plus location distance. "
-        "If no serialized model is available, it trains one automatically from the current dataset."
-    )
-    st.markdown(f"**Model artifacts:** `{MODEL_PATH.name}` / `{SCALER_PATH.name}`")
-    st.info("Run `python -m src.train` from the repo root to regenerate the saved model and evaluation report.")
 
+# ══════════════════════════════════════════════════════════════
+# TAB 5 — Recommend
+# ══════════════════════════════════════════════════════════════
 with tab5:
-    st.subheader("Personalized Shawarma Recommendations")
-    st.markdown(
-        "Enter your current GPS coordinates and choose a persona. The ranked list uses the trained model "
-        "alongside a persona-weighted score that balances price, rating, and walking distance."
-    )
-    col_a, col_b = st.columns(2)
+    st.subheader("🤖 Venue Recommendation Engine")
+    st.caption("Train two clustering algorithms, compare KPIs on a held-out test set, then find your best shawarma.")
 
-    with col_a:
-        persona = st.selectbox(
+    # ── Location & Persona ─────────────────────────────────────
+    st.markdown("#### Settings")
+    col_c, col_p, col_d = st.columns(3)
+
+    with col_c:
+        cities_list = sorted(df_all["city"].dropna().unique().tolist())
+        default_city = "תל אביב יפו" if "תל אביב יפו" in cities_list else cities_list[0]
+        user_city = st.selectbox("Your city", cities_list, index=cities_list.index(default_city))
+
+    with col_p:
+        persona = st.radio(
             "Persona",
             ["student", "quality"],
-            format_func=lambda label: "Thrifty Student" if label == "student" else "Quality Enthusiast",
-        )
-        user_lat = st.number_input("Current latitude", value=31.5, format="%.6f")
-        user_lng = st.number_input("Current longitude", value=34.9, format="%.6f")
-        max_dist_km = st.slider("Maximum walking distance (km)", 0.5, 5.0, 2.0, step=0.1)
-
-    with col_b:
-        product_label = st.selectbox("Reference product", list(PRICE_LABELS.keys()))
-        price_col = PRICE_LABELS[product_label]
-        st.markdown(
-            "The model uses the selected NIS price column as the price feature for ranking. "
-            "If a venue is missing that price, it is excluded from the recommendation set."
+            format_func=lambda x: {"student": "🎓 Student", "quality": "👑 Quality"}[x],
         )
 
-    if st.button("Recommend"):
-        df_user = build_features(df_all, user_lat, user_lng)
-        df_user["price_nis"] = df_user[price_col]
-        df_user["ratings_count"] = df_user["reviews_count"].fillna(0).astype(int)
-        df_user = df_user.dropna(subset=["price_nis", "rating"])
+    with col_d:
+        max_dist = st.slider("Max distance (km)", 0.5, 10.0, 2.0, step=0.5)
 
-        df_recommend = predict(model, scaler, df_user, persona=persona, max_dist_km=max_dist_km)
-        if df_recommend.empty:
-            st.warning("No venues were found within the selected distance and feature filters.")
+    city_center = df_all.groupby("city")[["lat", "lng"]].mean()
+    user_lat = float(city_center.loc[user_city, "lat"])
+    user_lng = float(city_center.loc[user_city, "lng"])
+
+    st.divider()
+
+    # ── Train & Compare ────────────────────────────────────────
+    st.markdown("#### Step 1 — Train & Compare Algorithms")
+    st.caption("Splits data 70% train / 30% test · auto-tunes KMeans k ∈ {3…8} · evaluates Silhouette Score on both splits")
+
+    if st.button("🔬 Train & Compare Models", type="secondary"):
+        with st.spinner("Training KMeans, DBSCAN, and Agglomerative on 70% train split…"):
+            km_result, db_result, agg_result = compare_algorithms(df_all)
+            st.session_state["km_result"] = km_result
+            st.session_state["db_result"] = db_result
+            st.session_state["agg_result"] = agg_result
+            save_model(km_result)
+
+    if "km_result" in st.session_state:
+        km = st.session_state["km_result"]
+        db = st.session_state["db_result"]
+        agg = st.session_state["agg_result"]
+
+        cmp_data = {
+            "Algorithm": ["KMeans", "DBSCAN", "Agglomerative"],
+            "Paradigm": ["Partitional", "Density-based", "Hierarchical (ward)"],
+            "Hyperparameters": [
+                f"k = {km['k']} (auto-tuned)",
+                f"eps = {db['eps']}, min_samples = {db['min_samples']}",
+                f"k = {agg['k']} (auto-tuned), linkage = ward",
+            ],
+            "Train Silhouette": [
+                round(km["train_silhouette"], 3),
+                round(db["train_silhouette"], 3),
+                round(agg["train_silhouette"], 3),
+            ],
+            "Test Silhouette": [
+                round(km["test_silhouette"], 3),
+                round(db["test_silhouette"], 3),
+                round(agg["test_silhouette"], 3),
+            ],
+            "Meets KPI ≥ 0.45": [
+                "✅" if km["test_silhouette"] >= 0.45 else "❌",
+                "✅" if db["test_silhouette"] >= 0.45 else "❌",
+                "✅" if agg["test_silhouette"] >= 0.45 else "❌",
+            ],
+            "predict() support": ["✅ native", "❌ KNN fallback", "❌ KNN fallback"],
+        }
+        st.dataframe(pd.DataFrame(cmp_data), use_container_width=True, hide_index=True)
+
+        # Elbow chart — KMeans silhouette by k (same k used for Agglomerative)
+        k_vals = list(km["k_scores"].keys())
+        sil_vals = list(km["k_scores"].values())
+        fig_elbow = px.line(
+            x=k_vals, y=sil_vals, markers=True,
+            labels={"x": "k (clusters)", "y": "Silhouette Score"},
+            title=f"Silhouette sweep — best k = {km['k']} (shared by KMeans & Agglomerative)",
+            color_discrete_sequence=["#2a9d8f"],
+        )
+        fig_elbow.add_vline(
+            x=km["k"], line_dash="dash", line_color="#e76f51",
+            annotation_text=f"k={km['k']}  sil={km['k_scores'][km['k']]:.3f}",
+            annotation_position="top right",
+        )
+        fig_elbow.update_layout(yaxis_range=[0, 1])
+        st.plotly_chart(fig_elbow, use_container_width=True)
+
+        # Verdict
+        best_test = max(km["test_silhouette"], db["test_silhouette"], agg["test_silhouette"])
+        st.success(
+            f"**Selected model: KMeans (k={km['k']})** — "
+            f"only algorithm with native predict() for new venues. "
+            f"Test silhouettes: KMeans {km['test_silhouette']:.3f} · "
+            f"DBSCAN {db['test_silhouette']:.3f} · "
+            f"Agglomerative {agg['test_silhouette']:.3f}. "
+            f"Model saved to `data/kmeans_model.pkl`."
+        )
+
+    st.divider()
+
+    # ── Recommendations ────────────────────────────────────────
+    st.markdown("#### Step 2 — Find Your Shawarma")
+
+    # Auto-load persisted model if session is fresh
+    if "km_result" not in st.session_state:
+        persisted = load_model()
+        if persisted:
+            st.session_state["km_result"] = persisted
+
+    if st.button("🥙 Find My Shawarma", type="primary"):
+        if "km_result" not in st.session_state:
+            st.warning("Run Step 1 first to train the model.")
         else:
-            baseline = df_user.sort_values("distance_km").head(10).copy()
-            weights = {
-                "student": {"price_nis": -1.5, "rating": 1.0, "distance_km": -0.8},
-                "quality": {"price_nis": -0.5, "rating": 2.0, "distance_km": -0.5},
-            }[persona]
-            baseline["score"] = (
-                weights["rating"] * baseline["rating"]
-                + weights["price_nis"] * baseline["price_nis"] / 10
-                + weights["distance_km"] * baseline["distance_km"]
+            result = st.session_state["km_result"]
+            df_recs = predict(
+                result, df_all,
+                persona=persona,
+                user_lat=user_lat,
+                user_lng=user_lng,
+                max_dist_km=max_dist,
             )
-
-            st.metric("Top recommendation", df_recommend.iloc[0]["name"])
-            st.metric("Top 10 average model score", f"{df_recommend.head(10)['score'].mean():.2f}")
-            st.metric("Top 10 average distance-only score", f"{baseline['score'].mean():.2f}")
-
-            result_cols = ["name", "city", "rating", "price_nis", "distance_km", "cluster", "score", "google_maps_url"]
-            output = df_recommend.head(20)[result_cols].rename(
-                columns={
-                    "name": "Name",
-                    "city": "City",
-                    "rating": "Rating",
-                    "price_nis": "Price (NIS)",
-                    "distance_km": "Distance (km)",
-                    "cluster": "Cluster",
-                    "score": "Persona Score",
-                    "google_maps_url": "Google Maps",
+            if df_recs.empty:
+                st.info(
+                    f"No venues found within {max_dist} km of {user_city}. "
+                    f"Try increasing the distance or selecting a larger city."
+                )
+            else:
+                st.success(f"Found **{len(df_recs):,}** venues · showing top 10")
+                display_cols = ["name", "city", "rating", "price_nis", "distance_km", "cluster", "score"]
+                if "google_maps_url" in df_recs.columns:
+                    display_cols.append("google_maps_url")
+                top10 = df_recs.head(10)[display_cols].copy()
+                top10["distance_km"] = top10["distance_km"].round(2)
+                top10["score"] = top10["score"].round(2)
+                top10.index = range(1, len(top10) + 1)
+                col_rename = {
+                    "name": "Venue", "city": "City", "rating": "Rating",
+                    "price_nis": "Price (NIS)", "distance_km": "Dist (km)",
+                    "cluster": "Cluster", "score": "Score", "google_maps_url": "Maps",
                 }
-            )
-            output.index += 1
-            st.dataframe(
-                output,
-                use_container_width=True,
-                column_config={
-                    "Google Maps": st.column_config.LinkColumn("Google Maps", display_text="Open ↗"),
+                col_config = {
                     "Rating": st.column_config.NumberColumn(format="%.1f ⭐"),
-                    "Price (NIS)": st.column_config.NumberColumn(format="₪%d"),
-                    "Distance (km)": st.column_config.NumberColumn(format="%.2f"),
-                    "Persona Score": st.column_config.NumberColumn(format="%.2f"),
-                },
-            )
+                    "Price (NIS)": st.column_config.NumberColumn(format="₪%.0f"),
+                    "Dist (km)": st.column_config.NumberColumn(format="%.2f km"),
+                }
+                if "google_maps_url" in display_cols:
+                    col_config["Maps"] = st.column_config.LinkColumn("Maps", display_text="Open ↗")
+                st.dataframe(
+                    top10.rename(columns=col_rename),
+                    use_container_width=True,
+                    column_config=col_config,
+                )

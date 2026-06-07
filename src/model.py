@@ -1,4 +1,4 @@
-"""Clustering models: KMeans and DBSCAN trained on venue features with train/test KPI reporting."""
+"""Clustering models: KMeans, DBSCAN, Agglomerative — train/test KPI reporting."""
 from __future__ import annotations
 import pickle
 from math import asin, cos, radians, sin, sqrt
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import DBSCAN, AgglomerativeClustering, KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
@@ -21,17 +21,16 @@ PERSONA_WEIGHTS = {
 }
 
 
-def _persona_score(df: pd.DataFrame, persona: str) -> pd.Series:
-    weights = PERSONA_WEIGHTS.get(persona, PERSONA_WEIGHTS["student"])
-    return (
-        weights["rating"] * df["rating"]
-        + weights["price_nis"] * df["price_nis"] / 10
-        + weights["distance_km"] * df["distance_km"]
-    )
+def split_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """70/30 stratified train/test split on venues with valid price and rating."""
+    df_valid = df.dropna(subset=["rating", "price_nis"]).copy()
+    df_train, df_test = train_test_split(df_valid, test_size=0.30, random_state=42)
+    return df_train.reset_index(drop=True), df_test.reset_index(drop=True)
 
 
-def train(df: pd.DataFrame, k: int = 5) -> tuple[KMeans, StandardScaler, float]:
-    """Fit KMeans on venue features. Returns (model, scaler, silhouette_score)."""
+def _scale(
+    df_train: pd.DataFrame, df_test: pd.DataFrame
+) -> tuple[np.ndarray, np.ndarray, StandardScaler]:
     scaler = StandardScaler()
     X_train = scaler.fit_transform(df_train[FEATURE_COLS].fillna(0))
     X_test = scaler.transform(df_test[FEATURE_COLS].fillna(0))
@@ -109,10 +108,44 @@ def train_dbscan(
     }
 
 
-def compare_algorithms(df: pd.DataFrame) -> tuple[dict, dict]:
-    """Split data 70/30, train both algorithms, return results for comparison."""
+def train_agglomerative(df_train: pd.DataFrame, df_test: pd.DataFrame) -> dict:
+    """Train AgglomerativeClustering (ward linkage) with auto-tuned k.
+    Test labels assigned via 1-NN on training set (no native predict support)."""
+    X_train, X_test, scaler = _scale(df_train, df_test)
+
+    # Reuse the same k sweep as KMeans for a fair comparison
+    best_k, k_scores = find_best_k(X_train)
+
+    model = AgglomerativeClustering(n_clusters=best_k, linkage="ward")
+    train_labels = model.fit_predict(X_train)
+    train_sil = float(silhouette_score(X_train, train_labels))
+
+    # 1-NN assignment for out-of-sample test evaluation
+    knn = KNeighborsClassifier(n_neighbors=1)
+    knn.fit(X_train, train_labels)
+    test_labels = knn.predict(X_test)
+    test_sil = float(silhouette_score(X_test, test_labels))
+
+    return {
+        "algorithm": "Agglomerative",
+        "model": model,
+        "knn": knn,           # kept for predict() fallback
+        "scaler": scaler,
+        "k": best_k,
+        "linkage": "ward",
+        "train_silhouette": train_sil,
+        "test_silhouette": test_sil,
+    }
+
+
+def compare_algorithms(df: pd.DataFrame) -> tuple[dict, dict, dict]:
+    """Split data 70/30, train all three algorithms, return results for comparison."""
     df_train, df_test = split_data(df)
-    return train_kmeans(df_train, df_test), train_dbscan(df_train, df_test)
+    return (
+        train_kmeans(df_train, df_test),
+        train_dbscan(df_train, df_test),
+        train_agglomerative(df_train, df_test),
+    )
 
 
 def save_model(result: dict, path: Path = MODEL_PATH) -> None:
@@ -134,18 +167,6 @@ def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     dlng = radians(lng2 - lng1)
     a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
     return 2 * R * asin(sqrt(a))
-
-
-def evaluate_silhouette(model: KMeans, scaler: StandardScaler, df: pd.DataFrame) -> float:
-    X = scaler.transform(df[FEATURE_COLS].fillna(0))
-    labels = model.predict(X)
-    return silhouette_score(X, labels)
-
-
-def baseline_distance_ranking(df: pd.DataFrame, persona: str = "student", top_k: int = 10) -> pd.DataFrame:
-    baseline = df.sort_values("distance_km").head(top_k).copy()
-    baseline["baseline_score"] = _persona_score(baseline, persona)
-    return baseline
 
 
 def predict(
