@@ -41,6 +41,8 @@ def clean(df_raw: pd.DataFrame) -> pd.DataFrame:
     df["ratings_count"] = df["reviews_count"].fillna(0).astype(int)
     df["car_park_nearby"] = df["car_park_nearby"].map({"True": True, "False": False})
 
+    df["price_nis"] = df.get("price_turkey_shawarma_pita", pd.NA)
+
     df = df.dropna(subset=["lat", "lng"])
     df = df.drop_duplicates(subset=["name", "lat", "lng"])
     return df.reset_index(drop=True)
