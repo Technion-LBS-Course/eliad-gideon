@@ -6,6 +6,7 @@ from src.model import (
     FEATURE_COLS,
     predict,
     split_data,
+    train_agglomerative,
     train_kmeans,
 )
 
@@ -51,6 +52,16 @@ def test_predict_returns_ranked_list():
     assert "score" in recs.columns
     scores = recs["score"].tolist()
     assert scores == sorted(scores, reverse=True)
+
+
+def test_train_agglomerative_returns_scores():
+    df_train, df_test = split_data(DF)
+    result = train_agglomerative(df_train, df_test)
+    assert result["algorithm"] == "Agglomerative"
+    assert result["linkage"] == "ward"
+    assert 0 < result["train_silhouette"] < 1
+    assert 0 < result["test_silhouette"] < 1
+    assert 3 <= result["k"] <= 8
 
 
 def test_predict_empty_on_impossible_location():

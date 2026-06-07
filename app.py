@@ -4,7 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 from src.data import load_raw, clean
-from src.model import compare_algorithms, load_model, predict, save_model
+from src.model import compare_algorithms, load_model, predict, save_model, train_agglomerative
 
 st.set_page_config(page_title="Appetite Engineering", layout="wide", page_icon="🥙")
 
@@ -485,42 +485,52 @@ with tab5:
     st.caption("Splits data 70% train / 30% test · auto-tunes KMeans k ∈ {3…8} · evaluates Silhouette Score on both splits")
 
     if st.button("🔬 Train & Compare Models", type="secondary"):
-        with st.spinner("Training KMeans (k-sweep) and DBSCAN on 70 % train split…"):
-            km_result, db_result = compare_algorithms(df_all)
+        with st.spinner("Training KMeans, DBSCAN, and Agglomerative on 70% train split…"):
+            km_result, db_result, agg_result = compare_algorithms(df_all)
             st.session_state["km_result"] = km_result
             st.session_state["db_result"] = db_result
+            st.session_state["agg_result"] = agg_result
             save_model(km_result)
 
     if "km_result" in st.session_state:
         km = st.session_state["km_result"]
         db = st.session_state["db_result"]
+        agg = st.session_state["agg_result"]
 
         cmp_data = {
-            "Algorithm": ["KMeans", "DBSCAN"],
+            "Algorithm": ["KMeans", "DBSCAN", "Agglomerative"],
+            "Paradigm": ["Partitional", "Density-based", "Hierarchical (ward)"],
             "Hyperparameters": [
-                f"k = {km['k']} (auto-tuned via silhouette sweep)",
+                f"k = {km['k']} (auto-tuned)",
                 f"eps = {db['eps']}, min_samples = {db['min_samples']}",
+                f"k = {agg['k']} (auto-tuned), linkage = ward",
             ],
-            "Train Silhouette": [round(km["train_silhouette"], 3), round(db["train_silhouette"], 3)],
-            "Test Silhouette": [round(km["test_silhouette"], 3), round(db["test_silhouette"], 3)],
+            "Train Silhouette": [
+                round(km["train_silhouette"], 3),
+                round(db["train_silhouette"], 3),
+                round(agg["train_silhouette"], 3),
+            ],
+            "Test Silhouette": [
+                round(km["test_silhouette"], 3),
+                round(db["test_silhouette"], 3),
+                round(agg["test_silhouette"], 3),
+            ],
             "Meets KPI ≥ 0.45": [
                 "✅" if km["test_silhouette"] >= 0.45 else "❌",
                 "✅" if db["test_silhouette"] >= 0.45 else "❌",
+                "✅" if agg["test_silhouette"] >= 0.45 else "❌",
             ],
-            "Notes": [
-                "Native predict() — works on new venues",
-                f"{db['noise_pct']:.1f}% noise points · no native predict",
-            ],
+            "predict() support": ["✅ native", "❌ KNN fallback", "❌ KNN fallback"],
         }
         st.dataframe(pd.DataFrame(cmp_data), use_container_width=True, hide_index=True)
 
-        # Elbow chart
+        # Elbow chart — KMeans silhouette by k (same k used for Agglomerative)
         k_vals = list(km["k_scores"].keys())
         sil_vals = list(km["k_scores"].values())
         fig_elbow = px.line(
             x=k_vals, y=sil_vals, markers=True,
             labels={"x": "k (clusters)", "y": "Silhouette Score"},
-            title=f"KMeans — Silhouette by k (best k = {km['k']})",
+            title=f"Silhouette sweep — best k = {km['k']} (shared by KMeans & Agglomerative)",
             color_discrete_sequence=["#2a9d8f"],
         )
         fig_elbow.add_vline(
@@ -532,12 +542,13 @@ with tab5:
         st.plotly_chart(fig_elbow, use_container_width=True)
 
         # Verdict
-        km_wins = km["test_silhouette"] >= db["test_silhouette"]
+        best_test = max(km["test_silhouette"], db["test_silhouette"], agg["test_silhouette"])
         st.success(
             f"**Selected model: KMeans (k={km['k']})** — "
-            f"test silhouette {km['test_silhouette']:.3f} {'≥' if km_wins else '<'} "
-            f"DBSCAN {db['test_silhouette']:.3f}. "
-            f"KMeans also supports native predict() on new venues, which DBSCAN does not. "
+            f"only algorithm with native predict() for new venues. "
+            f"Test silhouettes: KMeans {km['test_silhouette']:.3f} · "
+            f"DBSCAN {db['test_silhouette']:.3f} · "
+            f"Agglomerative {agg['test_silhouette']:.3f}. "
             f"Model saved to `data/kmeans_model.pkl`."
         )
 

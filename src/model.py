@@ -1,4 +1,4 @@
-"""Clustering models: KMeans and DBSCAN trained on venue features with train/test KPI reporting."""
+"""Clustering models: KMeans, DBSCAN, Agglomerative — train/test KPI reporting."""
 from __future__ import annotations
 import pickle
 from math import asin, cos, radians, sin, sqrt
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import DBSCAN, KMeans
+from sklearn.cluster import DBSCAN, AgglomerativeClustering, KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
@@ -108,10 +108,44 @@ def train_dbscan(
     }
 
 
-def compare_algorithms(df: pd.DataFrame) -> tuple[dict, dict]:
-    """Split data 70/30, train both algorithms, return results for comparison."""
+def train_agglomerative(df_train: pd.DataFrame, df_test: pd.DataFrame) -> dict:
+    """Train AgglomerativeClustering (ward linkage) with auto-tuned k.
+    Test labels assigned via 1-NN on training set (no native predict support)."""
+    X_train, X_test, scaler = _scale(df_train, df_test)
+
+    # Reuse the same k sweep as KMeans for a fair comparison
+    best_k, k_scores = find_best_k(X_train)
+
+    model = AgglomerativeClustering(n_clusters=best_k, linkage="ward")
+    train_labels = model.fit_predict(X_train)
+    train_sil = float(silhouette_score(X_train, train_labels))
+
+    # 1-NN assignment for out-of-sample test evaluation
+    knn = KNeighborsClassifier(n_neighbors=1)
+    knn.fit(X_train, train_labels)
+    test_labels = knn.predict(X_test)
+    test_sil = float(silhouette_score(X_test, test_labels))
+
+    return {
+        "algorithm": "Agglomerative",
+        "model": model,
+        "knn": knn,           # kept for predict() fallback
+        "scaler": scaler,
+        "k": best_k,
+        "linkage": "ward",
+        "train_silhouette": train_sil,
+        "test_silhouette": test_sil,
+    }
+
+
+def compare_algorithms(df: pd.DataFrame) -> tuple[dict, dict, dict]:
+    """Split data 70/30, train all three algorithms, return results for comparison."""
     df_train, df_test = split_data(df)
-    return train_kmeans(df_train, df_test), train_dbscan(df_train, df_test)
+    return (
+        train_kmeans(df_train, df_test),
+        train_dbscan(df_train, df_test),
+        train_agglomerative(df_train, df_test),
+    )
 
 
 def save_model(result: dict, path: Path = MODEL_PATH) -> None:
