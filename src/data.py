@@ -37,6 +37,8 @@ def clean(df_raw: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    df["price_nis"] = df[PRICE_COLS].mean(axis=1, skipna=True)
+    df["ratings_count"] = df["reviews_count"].fillna(0).astype(int)
     df["car_park_nearby"] = df["car_park_nearby"].map({"True": True, "False": False})
 
     df["price_nis"] = df.get("price_turkey_shawarma_pita", pd.NA)
@@ -55,6 +57,11 @@ def build_features(df_clean: pd.DataFrame, user_lat: float, user_lng: float) -> 
         return 2 * R * asin(sqrt(a))
 
     df = df_clean.copy()
+    if "price_nis" not in df.columns:
+        df["price_nis"] = df[PRICE_COLS].mean(axis=1, skipna=True)
+    if "ratings_count" not in df.columns:
+        df["ratings_count"] = df["reviews_count"].fillna(0).astype(int)
+
     df["distance_km"] = df.apply(
         lambda r: haversine(user_lat, user_lng, r["lat"], r["lng"]), axis=1
     )
