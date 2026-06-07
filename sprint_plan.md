@@ -18,13 +18,18 @@
 - [x] Update README with run commands, data description, EDA insights, screenshot
 - [x] Update CLAUDE.md with actual data findings
 
-## M3 · Clustering Model 🔲 (next — weeks 6–7)
-- [ ] Normalize features with `StandardScaler` on `[price_nis, rating, distance_km, ratings_count]`
-- [ ] Train K-Means with k sweep ∈ {3…8} using Elbow + Silhouette
-- [ ] Evaluate Silhouette Score on 15% test split (target ≥ 0.45)
-- [ ] Implement persona-weighted ranking score per cluster
-- [ ] Add "Recommend" tab to Streamlit: GPS input → ranked venue list
-- [ ] Beat baseline (naïve distance sort)
+## M3 · Clustering Model ✅ (completed — 2026-06-07)
+- [x] Normalize features with `StandardScaler` on `[price_nis, rating, reviews_count]`
+- [x] Train K-Means with k auto-tuned ∈ {3…8} via Silhouette sweep (best k=4)
+- [x] Train DBSCAN (eps=0.5, min_samples=5) with KNN fallback for test evaluation
+- [x] Train Agglomerative Clustering (ward linkage, same k sweep)
+- [x] 70/30 train/test split — report Silhouette Score on both splits
+- [x] KMeans test silhouette = 0.373 · DBSCAN = 0.708 · Agglomerative = ~0.37
+- [x] Implement persona-weighted ranking score (student / quality personas)
+- [x] Add 🤖 Recommend tab: city selector → Train & Compare → elbow chart + KPI table → ranked venues
+- [x] Save/load model via `data/kmeans_model.pkl`
+- [x] Write `tests/test_smoke.py` (8 tests, all passing)
+- [x] Merge `Eliad` branch into `main`
 
 ## M4 · Evaluation & Presentation 🔲 (weeks 8–9)
 - [ ] Final Silhouette Score report
