@@ -21,16 +21,17 @@ PERSONA_WEIGHTS = {
 }
 
 
-def split_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """70/30 stratified train/test split on venues with valid price and rating."""
-    df_valid = df.dropna(subset=["rating", "price_nis"]).copy()
-    df_train, df_test = train_test_split(df_valid, test_size=0.30, random_state=42)
-    return df_train.reset_index(drop=True), df_test.reset_index(drop=True)
+def _persona_score(df: pd.DataFrame, persona: str) -> pd.Series:
+    weights = PERSONA_WEIGHTS.get(persona, PERSONA_WEIGHTS["student"])
+    return (
+        weights["rating"] * df["rating"]
+        + weights["price_nis"] * df["price_nis"] / 10
+        + weights["distance_km"] * df["distance_km"]
+    )
 
 
-def _scale(
-    df_train: pd.DataFrame, df_test: pd.DataFrame
-) -> tuple[np.ndarray, np.ndarray, StandardScaler]:
+def train(df: pd.DataFrame, k: int = 5) -> tuple[KMeans, StandardScaler, float]:
+    """Fit KMeans on venue features. Returns (model, scaler, silhouette_score)."""
     scaler = StandardScaler()
     X_train = scaler.fit_transform(df_train[FEATURE_COLS].fillna(0))
     X_test = scaler.transform(df_test[FEATURE_COLS].fillna(0))
@@ -133,6 +134,18 @@ def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     dlng = radians(lng2 - lng1)
     a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
     return 2 * R * asin(sqrt(a))
+
+
+def evaluate_silhouette(model: KMeans, scaler: StandardScaler, df: pd.DataFrame) -> float:
+    X = scaler.transform(df[FEATURE_COLS].fillna(0))
+    labels = model.predict(X)
+    return silhouette_score(X, labels)
+
+
+def baseline_distance_ranking(df: pd.DataFrame, persona: str = "student", top_k: int = 10) -> pd.DataFrame:
+    baseline = df.sort_values("distance_km").head(top_k).copy()
+    baseline["baseline_score"] = _persona_score(baseline, persona)
+    return baseline
 
 
 def predict(
