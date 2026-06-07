@@ -77,12 +77,13 @@ Israel's shawarma market has 12,000+ venues with prices ranging ₪37–₪58 pe
 
 ### Algorithms compared
 
-| Algorithm | Hyperparameters | Train Silhouette | Test Silhouette | Meets KPI ≥ 0.45 |
-|-----------|----------------|-----------------|----------------|-----------------|
-| **KMeans** | k auto-tuned ∈ {3…8} via silhouette sweep | reported at runtime | reported at runtime | — |
-| **DBSCAN** | eps=0.5, min_samples=5 | reported at runtime | reported at runtime | — |
+| Algorithm | Paradigm | Hyperparameters | Train Silhouette | Test Silhouette | Meets KPI ≥ 0.45 |
+|-----------|----------|----------------|-----------------|----------------|-----------------|
+| **KMeans** | Partitional | k=4 (auto-tuned ∈ {3…8}) | 0.377 | 0.373 | ❌ |
+| **DBSCAN** | Density-based | eps=0.5, min_samples=5 | 0.729 | 0.708 | ✅ |
+| **Agglomerative** | Hierarchical | k=4 (ward linkage) | ~0.37 | ~0.37 | ❌ |
 
-**Selected model: KMeans** — rationale: higher test silhouette score and native `predict()` support for new venues (DBSCAN has no out-of-sample prediction).
+**Selected model: KMeans (k=4)** — only algorithm with native `predict()` for new venues. DBSCAN achieves a higher silhouette but cannot generalize out-of-sample without a KNN fallback. The low KMeans silhouette reflects the dataset's narrow ₪5 IQR price band, which limits cluster separability.
 
 ### Train / Test Split
 - **Split:** 70% train / 30% test, `random_state=42`
@@ -117,20 +118,25 @@ Trained model is persisted at `data/kmeans_model.pkl` and auto-loaded on next ru
 ## File Structure
 
 ```
-app.py                  — Streamlit entry point (UI shell only, no logic)
-requirements.txt        — Pinned dependencies
-README.md               — This file
-sprint_plan.md          — Milestone tracker
-CLAUDE.md               — Coding conventions and project conventions
+app.py                      — Streamlit entry point (5 tabs; UI shell only, no logic)
+requirements.txt            — Pinned dependencies
+README.md                   — This file
+sprint_plan.md              — Milestone tracker
+CLAUDE.md                   — Coding conventions and project context
 data/
-└── dataset.csv         — 12,270 clean venues
+├── dataset.csv             — 12,270 clean venues (committed)
+└── kmeans_model.pkl        — Trained KMeans model (auto-loaded by app)
 src/
 ├── __init__.py
-├── data.py             — load_raw(), clean(), build_features()
-├── eda.py              — compute_metrics(), chart functions
-└── model.py            — train(), predict()
+├── data.py                 — load_raw(), clean() [adds price_nis], build_features()
+├── eda.py                  — EDA chart functions
+└── model.py                — split_data(), find_best_k(), train_kmeans(),
+                              train_dbscan(), train_agglomerative(),
+                              compare_algorithms(), save_model(), load_model(), predict()
+tests/
+└── test_smoke.py           — 8 smoke tests (all must pass on every commit)
 notebooks/
-└── 01_eda.ipynb        — Exploratory analysis
+└── 01_eda.ipynb            — Exploratory analysis
 .gitignore
 ```
 

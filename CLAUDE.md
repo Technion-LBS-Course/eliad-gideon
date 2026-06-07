@@ -18,22 +18,34 @@ ML-powered app that recommends the best shawarma venue near the user by clusteri
 - **Missing reviews_count:** Most rows have NaN for `reviews_count`; `rating` is available for 96.1%
 - **Coordinate columns:** Raw CSV uses `latitude`/`longitude`; `src/data.py` renames them to `lat`/`lng`
 
-## Planned ML Model
-- **Algorithm:** K-Means clustering (k tuned via Elbow + Silhouette on validation set)
-- **Input features:** `[price_nis, rating, distance_km, ratings_count]` — all StandardScaler-normalized
+## ML Model (M3 — implemented)
+
+### Algorithms trained & compared (70 / 30 train/test split)
+| Algorithm | Paradigm | Train Silhouette | Test Silhouette | predict() |
+|-----------|----------|-----------------|----------------|-----------|
+| **KMeans** (k=4, auto-tuned) | Partitional | 0.377 | 0.373 | ✅ native |
+| DBSCAN (eps=0.5, min_samples=5) | Density-based | 0.729 | 0.708 | ❌ KNN fallback |
+| Agglomerative (ward, k=4) | Hierarchical | ~0.37 | ~0.37 | ❌ KNN fallback |
+
+- **Selected model:** KMeans — only algorithm with native `predict()` for new venues
+- **Input features:** `[price_nis, rating, reviews_count]` — StandardScaler-normalized venue properties (distance computed at query time, not used in clustering)
 - **Output:** cluster label per venue + persona-weighted ranking score
-- **Success metric:** Silhouette Score ≥ 0.45 on test split
+- **Success metric:** Silhouette Score ≥ 0.45 on test split (DBSCAN meets it; KMeans at 0.373 due to tight ₪5 IQR price band)
 - **Baseline to beat:** naive sort by distance only (no quality/price weighting)
+- **Saved model:** `data/kmeans_model.pkl` (auto-loaded by Streamlit on next run)
 
 ## File Structure
 ```
-app.py          — Streamlit entry point; calls src/ modules only, no logic here
-src/data.py     — load_raw(), clean(), build_features() → returns pd.DataFrame
-src/eda.py      — compute_metrics(), price_histogram(), price_vs_rating_scatter(), avg_rating_by_city_bar(), venue_map()
-src/model.py    — train(df) → fitted KMeans; predict(model, user_context) → ranked list
-data/dataset.csv — 12,270 clean venues (committed; not in data/raw/)
-notebooks/      — EDA only; no production code lives here
-tests/          — pytest; at minimum test_smoke.py must pass on every commit
+app.py                 — Streamlit entry point (5 tabs); calls src/ modules only, no logic here
+src/data.py            — load_raw(), clean() (adds price_nis), build_features()
+src/eda.py             — EDA chart functions (used by EDA tab)
+src/model.py           — split_data(), find_best_k(), train_kmeans(), train_dbscan(),
+                         train_agglomerative(), compare_algorithms(), save_model(),
+                         load_model(), predict()
+data/dataset.csv       — 12,270 clean venues (committed)
+data/kmeans_model.pkl  — trained KMeans model (committed; regenerate with Train button)
+tests/test_smoke.py    — 8 smoke tests; must all pass on every commit
+notebooks/             — EDA only; no production code lives here
 ```
 
 ## Coding Conventions
