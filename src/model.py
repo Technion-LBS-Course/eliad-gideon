@@ -13,6 +13,15 @@ PERSONA_WEIGHTS = {
 }
 
 
+def _persona_score(df: pd.DataFrame, persona: str) -> pd.Series:
+    weights = PERSONA_WEIGHTS.get(persona, PERSONA_WEIGHTS["student"])
+    return (
+        weights["rating"] * df["rating"]
+        + weights["price_nis"] * df["price_nis"] / 10
+        + weights["distance_km"] * df["distance_km"]
+    )
+
+
 def train(df: pd.DataFrame, k: int = 5) -> tuple[KMeans, StandardScaler, float]:
     """Fit KMeans on venue features. Returns (model, scaler, silhouette_score)."""
     scaler = StandardScaler()
@@ -21,6 +30,18 @@ def train(df: pd.DataFrame, k: int = 5) -> tuple[KMeans, StandardScaler, float]:
     model.fit(X)
     score = silhouette_score(X, model.labels_)
     return model, scaler, score
+
+
+def evaluate_silhouette(model: KMeans, scaler: StandardScaler, df: pd.DataFrame) -> float:
+    X = scaler.transform(df[FEATURE_COLS].fillna(0))
+    labels = model.predict(X)
+    return silhouette_score(X, labels)
+
+
+def baseline_distance_ranking(df: pd.DataFrame, persona: str = "student", top_k: int = 10) -> pd.DataFrame:
+    baseline = df.sort_values("distance_km").head(top_k).copy()
+    baseline["baseline_score"] = _persona_score(baseline, persona)
+    return baseline
 
 
 def predict(

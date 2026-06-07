@@ -1,9 +1,12 @@
-import streamlit as st
+import pickle
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
-from src.data import load_raw, clean
+from src.data import build_features, load_raw, clean
+from src.model import predict, train
 
 st.set_page_config(page_title="Appetite Engineering", layout="wide", page_icon="🥙")
 
@@ -23,6 +26,29 @@ def get_data() -> pd.DataFrame:
 
 
 df_all = get_data()
+
+MODEL_DIR = Path(__file__).parent / "models"
+MODEL_PATH = MODEL_DIR / "kmeans_model.pkl"
+SCALER_PATH = MODEL_DIR / "scaler.pkl"
+DEFAULT_LAT = 31.5
+DEFAULT_LNG = 34.9
+
+@st.cache_resource(show_spinner="Loading model…")
+def get_model():
+    if MODEL_PATH.exists() and SCALER_PATH.exists():
+        with open(MODEL_PATH, "rb") as handle:
+            model = pickle.load(handle)
+        with open(SCALER_PATH, "rb") as handle:
+            scaler = pickle.load(handle)
+        return model, scaler
+
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    model, scaler, _ = train(build_features(df_all, DEFAULT_LAT, DEFAULT_LNG), k=5)
+    with open(MODEL_PATH, "wb") as handle:
+        pickle.dump(model, handle)
+    with open(SCALER_PATH, "wb") as handle:
+        pickle.dump(scaler, handle)
+    return model, scaler
 
 # ── Sidebar — applies to EDA tab ───────────────────────────────
 with st.sidebar:
@@ -48,11 +74,12 @@ if only_parking:
     df_rated = df_rated[df_rated["car_park_nearby"] == True]
 
 # ── Tabs ───────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🎯 Problem & Personas",
     "📚 Literature & Market",
     "📊 EDA",
     "🏆 KPI & Model",
+    "🎯 Recommendation",
 ])
 
 
@@ -444,3 +471,90 @@ with tab4:
         ],
     }
     st.dataframe(pd.DataFrame(risk_data), use_container_width=True, hide_index=True)
+
+    model, scaler = get_model()
+    st.divider()
+    st.subheader("Recommendation Model Status")
+    st.markdown(
+        "This app uses a trained K-Means model on venue attributes plus location distance. "
+        "If no serialized model is available, it trains one automatically from the current dataset."
+    )
+    st.markdown(f"**Model artifacts:** `{MODEL_PATH.name}` / `{SCALER_PATH.name}`")
+    st.info("Run `python -m src.train` from the repo root to regenerate the saved model and evaluation report.")
+
+with tab5:
+    st.subheader("Personalized Shawarma Recommendations")
+    st.markdown(
+        "Enter your current GPS coordinates and choose a persona. The ranked list uses the trained model "
+        "alongside a persona-weighted score that balances price, rating, and walking distance."
+    )
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        persona = st.selectbox(
+            "Persona",
+            ["student", "quality"],
+            format_func=lambda label: "Thrifty Student" if label == "student" else "Quality Enthusiast",
+        )
+        user_lat = st.number_input("Current latitude", value=31.5, format="%.6f")
+        user_lng = st.number_input("Current longitude", value=34.9, format="%.6f")
+        max_dist_km = st.slider("Maximum walking distance (km)", 0.5, 5.0, 2.0, step=0.1)
+
+    with col_b:
+        product_label = st.selectbox("Reference product", list(PRICE_LABELS.keys()))
+        price_col = PRICE_LABELS[product_label]
+        st.markdown(
+            "The model uses the selected NIS price column as the price feature for ranking. "
+            "If a venue is missing that price, it is excluded from the recommendation set."
+        )
+
+    if st.button("Recommend"):
+        df_user = build_features(df_all, user_lat, user_lng)
+        df_user["price_nis"] = df_user[price_col]
+        df_user["ratings_count"] = df_user["reviews_count"].fillna(0).astype(int)
+        df_user = df_user.dropna(subset=["price_nis", "rating"])
+
+        df_recommend = predict(model, scaler, df_user, persona=persona, max_dist_km=max_dist_km)
+        if df_recommend.empty:
+            st.warning("No venues were found within the selected distance and feature filters.")
+        else:
+            baseline = df_user.sort_values("distance_km").head(10).copy()
+            weights = {
+                "student": {"price_nis": -1.5, "rating": 1.0, "distance_km": -0.8},
+                "quality": {"price_nis": -0.5, "rating": 2.0, "distance_km": -0.5},
+            }[persona]
+            baseline["score"] = (
+                weights["rating"] * baseline["rating"]
+                + weights["price_nis"] * baseline["price_nis"] / 10
+                + weights["distance_km"] * baseline["distance_km"]
+            )
+
+            st.metric("Top recommendation", df_recommend.iloc[0]["name"])
+            st.metric("Top 10 average model score", f"{df_recommend.head(10)['score'].mean():.2f}")
+            st.metric("Top 10 average distance-only score", f"{baseline['score'].mean():.2f}")
+
+            result_cols = ["name", "city", "rating", "price_nis", "distance_km", "cluster", "score", "google_maps_url"]
+            output = df_recommend.head(20)[result_cols].rename(
+                columns={
+                    "name": "Name",
+                    "city": "City",
+                    "rating": "Rating",
+                    "price_nis": "Price (NIS)",
+                    "distance_km": "Distance (km)",
+                    "cluster": "Cluster",
+                    "score": "Persona Score",
+                    "google_maps_url": "Google Maps",
+                }
+            )
+            output.index += 1
+            st.dataframe(
+                output,
+                use_container_width=True,
+                column_config={
+                    "Google Maps": st.column_config.LinkColumn("Google Maps", display_text="Open ↗"),
+                    "Rating": st.column_config.NumberColumn(format="%.1f ⭐"),
+                    "Price (NIS)": st.column_config.NumberColumn(format="₪%d"),
+                    "Distance (km)": st.column_config.NumberColumn(format="%.2f"),
+                    "Persona Score": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
