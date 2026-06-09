@@ -148,6 +148,50 @@ def compare_algorithms(df: pd.DataFrame) -> tuple[dict, dict, dict]:
     )
 
 
+def assign_cluster_labels(result: dict, df: pd.DataFrame) -> dict[int, str]:
+    """Map each cluster ID to a semantic label based on its centroid price and rating.
+
+    Uses dataset-wide 33rd/67th percentiles as thresholds so labels are relative
+    to the actual distribution rather than arbitrary absolute values.
+    """
+    model = result["model"]
+    scaler = result["scaler"]
+
+    centroids = scaler.inverse_transform(model.cluster_centers_)
+    price_idx = FEATURE_COLS.index("price_nis")
+    rating_idx = FEATURE_COLS.index("rating")
+
+    price_33 = float(df["price_nis"].quantile(0.33))
+    price_67 = float(df["price_nis"].quantile(0.67))
+    rating_33 = float(df["rating"].quantile(0.33))
+    rating_67 = float(df["rating"].quantile(0.67))
+
+    def _rating_label(r: float) -> str:
+        if r >= rating_67:
+            return "Good"
+        if r >= rating_33:
+            return "Average"
+        return "Below Average"
+
+    def _price_label(p: float) -> str:
+        if p >= price_67:
+            return "Expensive"
+        if p >= price_33:
+            return "Reasonable"
+        return "Affordable"
+
+    labels: dict[int, str] = {}
+    seen: dict[str, int] = {}
+    for cid, centroid in enumerate(centroids):
+        base = f"{_rating_label(centroid[rating_idx])} & {_price_label(centroid[price_idx])}"
+        # Disambiguate duplicates with the centroid price
+        label = base if base not in seen else f"{base} (₪{centroid[price_idx]:.0f})"
+        labels[cid] = label
+        seen[base] = cid
+
+    return labels
+
+
 def save_model(result: dict, path: Path = MODEL_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:

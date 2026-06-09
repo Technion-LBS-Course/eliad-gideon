@@ -4,7 +4,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 from src.data import load_raw, clean
-from src.model import compare_algorithms, load_model, predict, save_model, train_agglomerative
+from src.model import (
+    assign_cluster_labels,
+    compare_algorithms,
+    load_model,
+    predict,
+    save_model,
+    train_agglomerative,
+)
 
 st.set_page_config(page_title="Appetite Engineering", layout="wide", page_icon="🥙")
 
@@ -54,7 +61,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📚 Literature & Market",
     "📊 EDA",
     "🏆 KPI & Model",
-    "🤖 Recommend",
+    "🔮 Predicted",
 ])
 
 
@@ -449,28 +456,28 @@ with tab4:
 
 
 # ══════════════════════════════════════════════════════════════
-# TAB 5 — Recommend
+# TAB 5 — Predicted
 # ══════════════════════════════════════════════════════════════
 with tab5:
-    st.subheader("🤖 Venue Recommendation Engine")
-    st.caption("Train two clustering algorithms, compare KPIs on a held-out test set, then find your best shawarma.")
+    st.subheader("🔮 Predicted — Shawarma Cluster Finder")
+    st.caption(
+        "The first stage of identifying your best shawarma: cluster all venues by price and rating, "
+        "choose the cluster that matches your expectations, then get a ranked list."
+    )
 
-    # ── Location & Persona ─────────────────────────────────────
+    # ── Settings ───────────────────────────────────────────────
     st.markdown("#### Settings")
     col_c, col_p, col_d = st.columns(3)
-
     with col_c:
         cities_list = sorted(df_all["city"].dropna().unique().tolist())
         default_city = "תל אביב יפו" if "תל אביב יפו" in cities_list else cities_list[0]
         user_city = st.selectbox("Your city", cities_list, index=cities_list.index(default_city))
-
     with col_p:
         persona = st.radio(
             "Persona",
             ["student", "quality"],
             format_func=lambda x: {"student": "🎓 Student", "quality": "👑 Quality"}[x],
         )
-
     with col_d:
         max_dist = st.slider("Max distance (km)", 0.5, 10.0, 2.0, step=0.5)
 
@@ -480,9 +487,51 @@ with tab5:
 
     st.divider()
 
+    # ── Algorithm Overview ─────────────────────────────────────
+    st.markdown("#### Why These 3 Algorithms?")
+    st.caption(
+        "Three fundamentally different clustering paradigms were chosen to compare how well each "
+        "separates venues along the price–rating axis. All use the same features: "
+        "`[price_nis, rating, reviews_count]` — StandardScaler-normalized."
+    )
+
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        with st.container(border=True):
+            st.markdown("##### K-Means — Partitional")
+            st.markdown("""
+**How it works:** Assigns each venue to its nearest centroid, then re-computes centroids iteratively.
+
+**Why chosen:** Fast, scalable to 12k venues, and — critically — supports native `predict()` for new venues at query time.
+
+**Limitation:** Assumes spherical clusters of similar size; sensitive to the tight ₪5 price IQR.
+            """)
+    with a2:
+        with st.container(border=True):
+            st.markdown("##### DBSCAN — Density-Based")
+            st.markdown("""
+**How it works:** Groups venues in dense regions; marks sparse points as noise (−1). No k to specify.
+
+**Why chosen:** Shape-agnostic — can find non-spherical clusters and isolate outliers (e.g. uniquely priced venues).
+
+**Limitation:** No native `predict()` — new venues need a KNN fallback. Silhouette computed only on non-noise points, which inflates the score.
+            """)
+    with a3:
+        with st.container(border=True):
+            st.markdown("##### Agglomerative — Hierarchical")
+            st.markdown("""
+**How it works:** Merges the two closest clusters bottom-up using ward linkage (minimises intra-cluster variance).
+
+**Why chosen:** Reveals nested price–rating structure without assuming cluster shape; uses the same auto-tuned k as K-Means for a fair comparison.
+
+**Limitation:** No native `predict()` — new venues need a KNN fallback. Computationally heavier than K-Means.
+            """)
+
+    st.divider()
+
     # ── Train & Compare ────────────────────────────────────────
     st.markdown("#### Step 1 — Train & Compare Algorithms")
-    st.caption("Splits data 70% train / 30% test · auto-tunes KMeans k ∈ {3…8} · evaluates Silhouette Score on both splits")
+    st.caption("70% train / 30% test split · k auto-tuned ∈ {3…8} via silhouette sweep · KPI: Silhouette Score")
 
     if st.button("🔬 Train & Compare Models", type="secondary"):
         with st.spinner("Training KMeans, DBSCAN, and Agglomerative on 70% train split…"):
@@ -497,6 +546,7 @@ with tab5:
         db = st.session_state["db_result"]
         agg = st.session_state["agg_result"]
 
+        # Comparison table
         cmp_data = {
             "Algorithm": ["KMeans", "DBSCAN", "Agglomerative"],
             "Paradigm": ["Partitional", "Density-based", "Hierarchical (ward)"],
@@ -524,49 +574,119 @@ with tab5:
         }
         st.dataframe(pd.DataFrame(cmp_data), use_container_width=True, hide_index=True)
 
-        # Elbow chart — KMeans silhouette by k (same k used for Agglomerative)
-        k_vals = list(km["k_scores"].keys())
-        sil_vals = list(km["k_scores"].values())
-        fig_elbow = px.line(
-            x=k_vals, y=sil_vals, markers=True,
-            labels={"x": "k (clusters)", "y": "Silhouette Score"},
-            title=f"Silhouette sweep — best k = {km['k']} (shared by KMeans & Agglomerative)",
-            color_discrete_sequence=["#2a9d8f"],
-        )
-        fig_elbow.add_vline(
-            x=km["k"], line_dash="dash", line_color="#e76f51",
-            annotation_text=f"k={km['k']}  sil={km['k_scores'][km['k']]:.3f}",
-            annotation_position="top right",
-        )
-        fig_elbow.update_layout(yaxis_range=[0, 1])
-        st.plotly_chart(fig_elbow, use_container_width=True)
+        # Silhouette explanation
+        with st.expander("What is the Silhouette Score?"):
+            st.markdown("""
+The **Silhouette Score** measures how well each venue fits its assigned cluster compared to the nearest other cluster.
+It ranges from **−1 to +1**:
 
-        # Verdict
-        best_test = max(km["test_silhouette"], db["test_silhouette"], agg["test_silhouette"])
+| Score range | Meaning |
+|-------------|---------|
+| > 0.70 | Strong, well-separated clusters |
+| 0.45 – 0.70 | Reasonable structure — clusters are meaningful |
+| 0.25 – 0.45 | Weak structure — some overlap between clusters |
+| < 0.25 | Clusters overlap — no better than random |
+
+**Why our KMeans scores ~0.37 (below the 0.45 target):**
+The dataset has a very tight price band — 50% of venues fall within a ₪5 window (IQR ₪43–₪48).
+This compresses the price axis and makes it hard for any algorithm to produce well-separated clusters.
+DBSCAN's higher score (0.71) is partly because it only evaluates non-noise points, which inflates the metric.
+            """)
+
+        # Elbow chart
+        col_elbow, col_scatter = st.columns(2)
+        with col_elbow:
+            k_vals = list(km["k_scores"].keys())
+            sil_vals = list(km["k_scores"].values())
+            fig_elbow = px.line(
+                x=k_vals, y=sil_vals, markers=True,
+                labels={"x": "k (clusters)", "y": "Silhouette Score"},
+                title=f"Silhouette sweep — best k = {km['k']}",
+                color_discrete_sequence=["#2a9d8f"],
+            )
+            fig_elbow.add_vline(
+                x=km["k"], line_dash="dash", line_color="#e76f51",
+                annotation_text=f"k={km['k']}",
+                annotation_position="top right",
+            )
+            fig_elbow.update_layout(yaxis_range=[0, 1], height=350)
+            st.plotly_chart(fig_elbow, use_container_width=True)
+
+        # Cluster scatter: price vs rating coloured by cluster label
+        with col_scatter:
+            cluster_labels = assign_cluster_labels(km, df_all)
+            df_sample = df_all.dropna(subset=["price_nis", "rating"]).sample(
+                min(2000, len(df_all)), random_state=42
+            ).copy()
+            from src.model import FEATURE_COLS as _FC
+            X_sample = km["scaler"].transform(df_sample[_FC].fillna(0))
+            df_sample["cluster_id"] = km["model"].predict(X_sample)
+            df_sample["cluster_label"] = df_sample["cluster_id"].map(cluster_labels)
+            fig_scatter = px.scatter(
+                df_sample, x="price_nis", y="rating",
+                color="cluster_label",
+                opacity=0.5,
+                labels={"price_nis": "Price (NIS)", "rating": "Rating", "cluster_label": "Cluster"},
+                title="Clusters — Price vs Rating",
+                height=350,
+            )
+            fig_scatter.update_traces(marker_size=4)
+            fig_scatter.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.4))
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+        # Winner rationale
         st.success(
             f"**Selected model: KMeans (k={km['k']})** — "
-            f"only algorithm with native predict() for new venues. "
-            f"Test silhouettes: KMeans {km['test_silhouette']:.3f} · "
-            f"DBSCAN {db['test_silhouette']:.3f} · "
-            f"Agglomerative {agg['test_silhouette']:.3f}. "
-            f"Model saved to `data/kmeans_model.pkl`."
+            f"the only algorithm with native `predict()` for new venues, enabling real-time recommendations. "
+            f"DBSCAN achieves a higher silhouette ({db['test_silhouette']:.3f}) but its score is inflated "
+            f"since it is computed only on non-noise points, and it cannot generalize to unseen venues "
+            f"without a KNN approximation. "
+            f"Agglomerative Clustering shares KMeans' silhouette ({agg['test_silhouette']:.3f}) "
+            f"but also lacks native prediction support. "
+            f"Model saved → `data/kmeans_model.pkl`."
         )
 
     st.divider()
 
-    # ── Recommendations ────────────────────────────────────────
-    st.markdown("#### Step 2 — Find Your Shawarma")
+    # ── Predicted Recommendations ──────────────────────────────
+    st.markdown("#### Step 2 — Choose Your Cluster & Find Your Shawarma")
 
-    # Auto-load persisted model if session is fresh
     if "km_result" not in st.session_state:
         persisted = load_model()
         if persisted:
             st.session_state["km_result"] = persisted
 
-    if st.button("🥙 Find My Shawarma", type="primary"):
-        if "km_result" not in st.session_state:
-            st.warning("Run Step 1 first to train the model.")
-        else:
+    if "km_result" in st.session_state:
+        km_loaded = st.session_state["km_result"]
+        cluster_labels_loaded = assign_cluster_labels(km_loaded, df_all)
+
+        # Build label options with venue counts for context
+        df_labeled = df_all.dropna(subset=["price_nis", "rating"]).copy()
+        from src.model import FEATURE_COLS as _FC2
+        X_all = km_loaded["scaler"].transform(df_labeled[_FC2].fillna(0))
+        df_labeled["cluster_id"] = km_loaded["model"].predict(X_all)
+        df_labeled["cluster_label"] = df_labeled["cluster_id"].map(cluster_labels_loaded)
+        label_counts = df_labeled["cluster_label"].value_counts().to_dict()
+
+        label_options = sorted(
+            cluster_labels_loaded.values(),
+            key=lambda lbl: (
+                0 if "Good" in lbl else (1 if "Average" in lbl else 2),
+                0 if "Affordable" in lbl else (1 if "Reasonable" in lbl else 2),
+            ),
+        )
+        label_options_display = [
+            f"{lbl}  ({label_counts.get(lbl, 0):,} venues)" for lbl in label_options
+        ]
+
+        selected_display = st.selectbox(
+            "Select the cluster that matches your expectations",
+            label_options_display,
+            help="Clusters are defined by their centroid price and rating relative to the full dataset distribution.",
+        )
+        selected_label = selected_display.split("  (")[0]
+
+        if st.button("🥙 Find My Shawarma", type="primary"):
             result = st.session_state["km_result"]
             df_recs = predict(
                 result, df_all,
@@ -575,34 +695,42 @@ with tab5:
                 user_lng=user_lng,
                 max_dist_km=max_dist,
             )
+            # Filter to selected cluster label
+            if not df_recs.empty:
+                df_recs["cluster_label"] = df_recs["cluster"].map(cluster_labels_loaded)
+                df_recs = df_recs[df_recs["cluster_label"] == selected_label]
+
             if df_recs.empty:
                 st.info(
-                    f"No venues found within {max_dist} km of {user_city}. "
-                    f"Try increasing the distance or selecting a larger city."
+                    f"No **{selected_label}** venues found within {max_dist} km of {user_city}. "
+                    f"Try a different cluster, increasing the distance, or selecting a larger city."
                 )
             else:
-                st.success(f"Found **{len(df_recs):,}** venues · showing top 10")
-                display_cols = ["name", "city", "rating", "price_nis", "distance_km", "cluster", "score"]
+                st.success(
+                    f"Found **{len(df_recs):,}** venues in cluster **{selected_label}** "
+                    f"within {max_dist} km · showing top 10"
+                )
+                display_cols = ["name", "city", "rating", "price_nis", "distance_km", "cluster_label", "score"]
                 if "google_maps_url" in df_recs.columns:
                     display_cols.append("google_maps_url")
                 top10 = df_recs.head(10)[display_cols].copy()
                 top10["distance_km"] = top10["distance_km"].round(2)
                 top10["score"] = top10["score"].round(2)
                 top10.index = range(1, len(top10) + 1)
-                col_rename = {
-                    "name": "Venue", "city": "City", "rating": "Rating",
-                    "price_nis": "Price (NIS)", "distance_km": "Dist (km)",
-                    "cluster": "Cluster", "score": "Score", "google_maps_url": "Maps",
-                }
-                col_config = {
-                    "Rating": st.column_config.NumberColumn(format="%.1f ⭐"),
-                    "Price (NIS)": st.column_config.NumberColumn(format="₪%.0f"),
-                    "Dist (km)": st.column_config.NumberColumn(format="%.2f km"),
-                }
-                if "google_maps_url" in display_cols:
-                    col_config["Maps"] = st.column_config.LinkColumn("Maps", display_text="Open ↗")
                 st.dataframe(
-                    top10.rename(columns=col_rename),
+                    top10.rename(columns={
+                        "name": "Venue", "city": "City", "rating": "Rating",
+                        "price_nis": "Price (NIS)", "distance_km": "Dist (km)",
+                        "cluster_label": "Cluster", "score": "Score",
+                        "google_maps_url": "Maps",
+                    }),
                     use_container_width=True,
-                    column_config=col_config,
+                    column_config={
+                        "Rating": st.column_config.NumberColumn(format="%.1f ⭐"),
+                        "Price (NIS)": st.column_config.NumberColumn(format="₪%.0f"),
+                        "Dist (km)": st.column_config.NumberColumn(format="%.2f km"),
+                        "Maps": st.column_config.LinkColumn("Maps", display_text="Open ↗"),
+                    },
                 )
+    else:
+        st.info("Run Step 1 first to train the model and unlock cluster selection.")
