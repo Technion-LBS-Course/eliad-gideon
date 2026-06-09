@@ -1,6 +1,15 @@
 from pathlib import Path
+import numpy as np
 import pandas as pd
 from math import radians, cos, sin, asin, sqrt
+
+# Bounding box covering Haifa city, Krayot, and Carmel
+HAIFA_BBOX = {
+    "lat_min": 32.70,
+    "lat_max": 32.95,
+    "lng_min": 34.93,
+    "lng_max": 35.15,
+}
 
 ROOT = Path(__file__).parent.parent
 _DEFAULT_CSV = ROOT / "data" / "dataset.csv"
@@ -46,6 +55,24 @@ def clean(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["lat", "lng"])
     df = df.drop_duplicates(subset=["name", "lat", "lng"])
     return df.reset_index(drop=True)
+
+
+def filter_haifa(df: pd.DataFrame) -> pd.DataFrame:
+    """Return only venues within the Haifa / Krayot / Carmel bounding box."""
+    return df[
+        df["lat"].between(HAIFA_BBOX["lat_min"], HAIFA_BBOX["lat_max"]) &
+        df["lng"].between(HAIFA_BBOX["lng_min"], HAIFA_BBOX["lng_max"])
+    ].reset_index(drop=True)
+
+
+def generate_haifa_queries(n: int = 500, seed: int = 42) -> pd.DataFrame:
+    """Generate n synthetic user-query coordinates within the Haifa/Krayot/Carmel area."""
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame({
+        "query_id": range(n),
+        "lat": rng.uniform(HAIFA_BBOX["lat_min"], HAIFA_BBOX["lat_max"], n),
+        "lng": rng.uniform(HAIFA_BBOX["lng_min"], HAIFA_BBOX["lng_max"], n),
+    })
 
 
 def build_features(df_clean: pd.DataFrame, user_lat: float, user_lng: float) -> pd.DataFrame:

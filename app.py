@@ -3,14 +3,22 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
-from src.data import load_raw, clean
+import folium
+from folium.plugins import HeatMap
+from streamlit_folium import st_folium
+
+from src.data import filter_haifa, generate_haifa_queries, load_raw, clean
 from src.model import (
     assign_cluster_labels,
+    assign_haifa_cluster_labels,
     compare_algorithms,
+    HAIFA_FEATURE_COLS,
     load_model,
     predict,
+    predict_from_map,
     save_model,
     train_agglomerative,
+    train_haifa_model,
 )
 
 st.set_page_config(page_title="Appetite Engineering", layout="wide", page_icon="🥙")
@@ -56,12 +64,13 @@ if only_parking:
     df_rated = df_rated[df_rated["car_park_nearby"] == True]
 
 # ── Tabs ───────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🎯 Problem & Personas",
     "📚 Literature & Market",
     "📊 EDA",
     "🏆 KPI & Model",
     "🔮 Predicted",
+    "🗺️ Haifa",
 ])
 
 
@@ -734,3 +743,218 @@ DBSCAN's higher score (0.71) is partly because it only evaluates non-noise point
                 )
     else:
         st.info("Run Step 1 first to train the model and unlock cluster selection.")
+
+
+# ══════════════════════════════════════════════════════════════
+# TAB 6 — Haifa Interactive Map
+# ══════════════════════════════════════════════════════════════
+_CLUSTER_PALETTE = [
+    "#2a9d8f", "#e76f51", "#264653", "#f4a261",
+    "#e9c46a", "#a8dadc", "#d62828", "#6a4c93",
+]
+
+with tab6:
+    st.subheader("🗺️ Haifa — Interactive Map Predictor")
+    st.caption(
+        "Model trained on **[price, rating, lat, lng]** — clusters capture both venue quality "
+        "and geographic sub-area (Carmel / Haifa / Krayot). "
+        "Click anywhere on the map to find the best shawarma near that point."
+    )
+
+    df_haifa = filter_haifa(df_all)
+    df_synth = generate_haifa_queries(500)
+
+    # ── Stats row ─────────────────────────────────────────────
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Venues in region", f"{len(df_haifa):,}")
+    m2.metric("Synthetic query points", "500")
+    m3.metric("Features used", "price · rating · lat · lng")
+
+    st.divider()
+
+    # ── Settings ───────────────────────────────────────────────
+    col_p, col_d, col_s = st.columns(3)
+    with col_p:
+        persona_h = st.radio(
+            "Persona", ["student", "quality"], key="persona_h",
+            format_func=lambda x: {"student": "🎓 Student", "quality": "👑 Quality"}[x],
+        )
+    with col_d:
+        max_dist_h = st.slider("Max distance (km)", 0.5, 5.0, 1.5, step=0.5, key="max_dist_h")
+    with col_s:
+        show_synth = st.checkbox("Heatmap: 500 synthetic query points", value=True)
+
+    # ── Train ──────────────────────────────────────────────────
+    st.divider()
+    st.markdown("#### Step 1 — Train Haifa Model")
+    st.caption(
+        "Includes `lat` and `lng` as features so the model discovers clusters that are "
+        "**geographically cohesive** (e.g. 'Good & Affordable — Carmel') in addition to "
+        "price and rating cohesion."
+    )
+
+    if st.button("🔬 Train Haifa Model", type="secondary", key="train_haifa"):
+        with st.spinner("Training KMeans on Haifa venues with [price, rating, lat, lng]…"):
+            h_result = train_haifa_model(df_haifa)
+            h_labels = assign_haifa_cluster_labels(h_result, df_haifa)
+            st.session_state["haifa_result"] = h_result
+            st.session_state["haifa_labels"] = h_labels
+
+    if "haifa_result" in st.session_state:
+        h_result = st.session_state["haifa_result"]
+        h_labels = st.session_state["haifa_labels"]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Best k", h_result["k"])
+        c2.metric("Train Silhouette", f"{h_result['train_silhouette']:.3f}")
+        c3.metric("Test Silhouette", f"{h_result['test_silhouette']:.3f}")
+
+        # Label legend
+        with st.expander("Cluster labels discovered"):
+            for cid, lbl in sorted(h_labels.items()):
+                color = _CLUSTER_PALETTE[cid % len(_CLUSTER_PALETTE)]
+                st.markdown(
+                    f"<span style='background:{color};color:#fff;padding:2px 8px;"
+                    f"border-radius:4px;font-size:0.85em'>{lbl}</span>",
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
+
+    # ── Map ────────────────────────────────────────────────────
+    st.markdown("#### Step 2 — Click on the Map")
+    st.caption("Click anywhere in the Haifa area — the app will query the model from that point.")
+
+    # Build base map
+    haifa_map = folium.Map(
+        location=[32.815, 35.01],
+        zoom_start=12,
+        tiles="OpenStreetMap",
+    )
+
+    # Venue markers
+    if "haifa_result" in st.session_state:
+        h_result = st.session_state["haifa_result"]
+        h_labels = st.session_state["haifa_labels"]
+        df_plot = df_haifa.dropna(subset=HAIFA_FEATURE_COLS).copy()
+        X_plot = h_result["scaler"].transform(df_plot[HAIFA_FEATURE_COLS])
+        df_plot["cluster_id"] = h_result["model"].predict(X_plot)
+        df_plot["cluster_label"] = df_plot["cluster_id"].map(h_labels)
+        unique_labels = sorted(df_plot["cluster_label"].unique())
+        color_map = {lbl: _CLUSTER_PALETTE[i % len(_CLUSTER_PALETTE)] for i, lbl in enumerate(unique_labels)}
+
+        for _, row in df_plot.iterrows():
+            folium.CircleMarker(
+                location=[row["lat"], row["lng"]],
+                radius=5,
+                color=color_map[row["cluster_label"]],
+                fill=True,
+                fill_opacity=0.75,
+                tooltip=(
+                    f"<b>{row['name']}</b><br>"
+                    f"{row['cluster_label']}<br>"
+                    f"⭐ {row['rating']:.1f} · ₪{row['price_nis']:.0f}"
+                ),
+            ).add_to(haifa_map)
+
+        # Legend
+        legend_html = "<div style='position:fixed;bottom:30px;left:30px;z-index:1000;" \
+                      "background:white;padding:10px;border-radius:6px;border:1px solid #ccc;" \
+                      "font-size:12px;max-width:200px'>"
+        for lbl, clr in color_map.items():
+            legend_html += (
+                f"<span style='background:{clr};display:inline-block;"
+                f"width:12px;height:12px;border-radius:50%;margin-right:5px'></span>"
+                f"{lbl}<br>"
+            )
+        legend_html += "</div>"
+        haifa_map.get_root().html.add_child(folium.Element(legend_html))
+    else:
+        # No model yet — grey markers
+        for _, row in df_haifa.dropna(subset=["lat", "lng"]).iterrows():
+            folium.CircleMarker(
+                location=[row["lat"], row["lng"]],
+                radius=4,
+                color="#6c757d",
+                fill=True,
+                fill_opacity=0.5,
+                tooltip=f"{row['name']} · ⭐{row['rating']:.1f}",
+            ).add_to(haifa_map)
+
+    # Synthetic query heatmap
+    if show_synth:
+        HeatMap(
+            [[r["lat"], r["lng"]] for _, r in df_synth.iterrows()],
+            radius=12, blur=8, max_zoom=13, name="Query coverage",
+        ).add_to(haifa_map)
+
+    # Render map — returns click info
+    map_out = st_folium(haifa_map, width="100%", height=520, returned_objects=["last_clicked"])
+
+    # ── Results from click ─────────────────────────────────────
+    if map_out and map_out.get("last_clicked"):
+        click_lat = map_out["last_clicked"]["lat"]
+        click_lng = map_out["last_clicked"]["lng"]
+
+        st.info(f"📍 Pinned: **{click_lat:.5f}°N, {click_lng:.5f}°E**")
+
+        if "haifa_result" not in st.session_state:
+            st.warning("Train the Haifa model first (Step 1) to get recommendations.")
+        else:
+            h_result = st.session_state["haifa_result"]
+            h_labels = st.session_state["haifa_labels"]
+
+            df_recs = predict_from_map(
+                h_result, df_haifa,
+                user_lat=click_lat, user_lng=click_lng,
+                persona=persona_h, max_dist_km=max_dist_h,
+            )
+
+            if df_recs.empty:
+                st.info(
+                    f"No venues within {max_dist_h} km of the clicked point. "
+                    "Try clicking closer to a populated area or increase the distance."
+                )
+            else:
+                df_recs["cluster_label"] = df_recs["cluster"].map(h_labels)
+                available = sorted(df_recs["cluster_label"].unique())
+                cluster_counts = df_recs["cluster_label"].value_counts().to_dict()
+
+                st.markdown("#### Results")
+                col_sel, col_info = st.columns([2, 3])
+                with col_sel:
+                    chosen = st.selectbox(
+                        "Filter by cluster",
+                        ["All"] + [f"{lbl} ({cluster_counts[lbl]})" for lbl in available],
+                        key="haifa_cluster_sel",
+                    )
+                with col_info:
+                    st.metric("Total venues nearby", len(df_recs))
+
+                chosen_label = None if chosen == "All" else chosen.rsplit(" (", 1)[0]
+                df_show = df_recs if chosen_label is None else df_recs[df_recs["cluster_label"] == chosen_label]
+
+                st.success(f"Showing **{min(10, len(df_show))}** of {len(df_show)} venues")
+                disp = ["name", "city", "rating", "price_nis", "distance_km", "cluster_label", "score"]
+                if "google_maps_url" in df_show.columns:
+                    disp.append("google_maps_url")
+                top = df_show.head(10)[disp].copy()
+                top["distance_km"] = top["distance_km"].round(2)
+                top["score"] = top["score"].round(2)
+                top.index = range(1, len(top) + 1)
+                st.dataframe(
+                    top.rename(columns={
+                        "name": "Venue", "city": "City", "rating": "Rating",
+                        "price_nis": "Price (NIS)", "distance_km": "Dist (km)",
+                        "cluster_label": "Cluster", "score": "Score",
+                        "google_maps_url": "Maps",
+                    }),
+                    use_container_width=True,
+                    column_config={
+                        "Rating": st.column_config.NumberColumn(format="%.1f ⭐"),
+                        "Price (NIS)": st.column_config.NumberColumn(format="₪%.0f"),
+                        "Dist (km)": st.column_config.NumberColumn(format="%.2f km"),
+                        "Maps": st.column_config.LinkColumn("Maps", display_text="Open ↗"),
+                    },
+                )
+    else:
+        st.info("👆 Click anywhere on the map above to get recommendations for that location.")

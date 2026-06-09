@@ -240,3 +240,110 @@ def predict(
         + w["distance_km"] * df["distance_km"]
     )
     return df.sort_values("score", ascending=False).reset_index(drop=True)
+
+
+# ── Haifa-specific model (includes lat/lng as clustering features) ──────────
+
+HAIFA_FEATURE_COLS = ["price_nis", "rating", "lat", "lng"]
+
+# Geographic sub-areas within the bounding box
+def _haifa_area(lat: float) -> str:
+    if lat >= 32.84:
+        return "Krayot"
+    if lat >= 32.78:
+        return "Haifa"
+    return "Carmel"
+
+
+def train_haifa_model(df: pd.DataFrame) -> dict:
+    """Train KMeans on Haifa venues using [price_nis, rating, lat, lng] features.
+    Including coordinates lets the model discover clusters that are both
+    geographically and quality-cohesive (e.g. 'Good & Affordable in Carmel')."""
+    df_valid = df.dropna(subset=HAIFA_FEATURE_COLS).copy()
+    df_train, df_test = train_test_split(df_valid, test_size=0.30, random_state=42)
+
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(df_train[HAIFA_FEATURE_COLS])
+    X_test = scaler.transform(df_test[HAIFA_FEATURE_COLS])
+
+    best_k, k_scores = find_best_k(X_train)
+
+    model = KMeans(n_clusters=best_k, random_state=42, n_init="auto")
+    model.fit(X_train)
+
+    train_sil = float(silhouette_score(X_train, model.labels_))
+    test_sil = float(silhouette_score(X_test, model.predict(X_test)))
+
+    return {
+        "algorithm": "KMeans-Haifa",
+        "model": model,
+        "scaler": scaler,
+        "feature_cols": HAIFA_FEATURE_COLS,
+        "k": best_k,
+        "k_scores": k_scores,
+        "train_silhouette": train_sil,
+        "test_silhouette": test_sil,
+    }
+
+
+def assign_haifa_cluster_labels(result: dict, df: pd.DataFrame) -> dict[int, str]:
+    """Semantic labels for Haifa clusters: quality × price × geographic sub-area."""
+    model = result["model"]
+    scaler = result["scaler"]
+    feature_cols = result.get("feature_cols", HAIFA_FEATURE_COLS)
+
+    centroids = scaler.inverse_transform(model.cluster_centers_)
+    price_idx = feature_cols.index("price_nis")
+    rating_idx = feature_cols.index("rating")
+    lat_idx = feature_cols.index("lat")
+
+    price_33 = float(df["price_nis"].quantile(0.33))
+    price_67 = float(df["price_nis"].quantile(0.67))
+    rating_33 = float(df["rating"].quantile(0.33))
+    rating_67 = float(df["rating"].quantile(0.67))
+
+    def _rl(r: float) -> str:
+        return "Good" if r >= rating_67 else ("Average" if r >= rating_33 else "Below Average")
+
+    def _pl(p: float) -> str:
+        return "Expensive" if p >= price_67 else ("Reasonable" if p >= price_33 else "Affordable")
+
+    labels: dict[int, str] = {}
+    seen: dict[str, int] = {}
+    for cid, c in enumerate(centroids):
+        base = f"{_rl(c[rating_idx])} & {_pl(c[price_idx])} — {_haifa_area(c[lat_idx])}"
+        label = base if base not in seen else f"{base} (₪{c[price_idx]:.0f})"
+        labels[cid] = label
+        seen[base] = cid
+
+    return labels
+
+
+def predict_from_map(
+    result: dict,
+    df: pd.DataFrame,
+    user_lat: float,
+    user_lng: float,
+    persona: str = "student",
+    max_dist_km: float = 2.0,
+) -> pd.DataFrame:
+    """Filter Haifa venues by distance from map pin, cluster, and rank by persona score."""
+    feature_cols = result.get("feature_cols", HAIFA_FEATURE_COLS)
+    df = df.copy()
+    df["distance_km"] = df.apply(
+        lambda r: _haversine(user_lat, user_lng, r["lat"], r["lng"]), axis=1
+    )
+    df = df[df["distance_km"] <= max_dist_km].dropna(subset=["price_nis", "rating"])
+    if df.empty:
+        return df
+
+    X = result["scaler"].transform(df[feature_cols].fillna(0))
+    df["cluster"] = result["model"].predict(X)
+
+    w = PERSONA_WEIGHTS.get(persona, PERSONA_WEIGHTS["student"])
+    df["score"] = (
+        w["rating"] * df["rating"]
+        + w["price_nis"] * df["price_nis"] / 10
+        + w["distance_km"] * df["distance_km"]
+    )
+    return df.sort_values("score", ascending=False).reset_index(drop=True)
