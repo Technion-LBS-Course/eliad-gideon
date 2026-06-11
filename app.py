@@ -550,7 +550,7 @@ with tab5:
             st.session_state["agg_result"] = agg_result
             save_model(km_result)
 
-    if "km_result" in st.session_state:
+    if "km_result" in st.session_state and "db_result" in st.session_state and "agg_result" in st.session_state:
         km = st.session_state["km_result"]
         db = st.session_state["db_result"]
         agg = st.session_state["agg_result"]
@@ -831,7 +831,7 @@ with tab6:
         tiles="OpenStreetMap",
     )
 
-    # Venue markers
+    # Venue markers — cap at 400 to keep the map responsive
     if "haifa_result" in st.session_state:
         h_result = st.session_state["haifa_result"]
         h_labels = st.session_state["haifa_labels"]
@@ -842,7 +842,8 @@ with tab6:
         unique_labels = sorted(df_plot["cluster_label"].unique())
         color_map = {lbl: _CLUSTER_PALETTE[i % len(_CLUSTER_PALETTE)] for i, lbl in enumerate(unique_labels)}
 
-        for _, row in df_plot.iterrows():
+        df_show = df_plot.nlargest(400, "rating")
+        for _, row in df_show.iterrows():
             folium.CircleMarker(
                 location=[row["lat"], row["lng"]],
                 radius=5,
@@ -869,8 +870,9 @@ with tab6:
         legend_html += "</div>"
         haifa_map.get_root().html.add_child(folium.Element(legend_html))
     else:
-        # No model yet — grey markers
-        for _, row in df_haifa.dropna(subset=["lat", "lng"]).iterrows():
+        # No model yet — show top-rated as grey markers
+        df_grey = df_haifa.dropna(subset=["lat", "lng"]).nlargest(400, "rating")
+        for _, row in df_grey.iterrows():
             folium.CircleMarker(
                 location=[row["lat"], row["lng"]],
                 radius=4,
@@ -888,7 +890,7 @@ with tab6:
         ).add_to(haifa_map)
 
     # Render map — returns click info
-    map_out = st_folium(haifa_map, width="100%", height=520, returned_objects=["last_clicked"])
+    map_out = st_folium(haifa_map, use_container_width=True, height=520, returned_objects=["last_clicked"])
 
     # ── Results from click ─────────────────────────────────────
     if map_out and map_out.get("last_clicked"):
