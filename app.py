@@ -7,6 +7,7 @@ import folium
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
 
+from src.agent import extract_params, fallback_recommend, recommend
 from src.data import filter_haifa, generate_haifa_queries, load_raw, clean
 from src.model import (
     assign_cluster_labels,
@@ -66,13 +67,14 @@ if only_parking:
     df_rated = df_rated[df_rated["car_park_nearby"] == True]
 
 # ── Tabs ───────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🎯 Problem & Personas",
     "📚 Literature & Market",
     "📊 EDA",
     "🏆 KPI & Model",
     "🔮 Predicted",
     "🗺️ Haifa",
+    "🤖 Agent",
 ])
 
 
@@ -1060,3 +1062,136 @@ with tab6:
                 )
     else:
         st.info("👆 Click anywhere on the map above to get recommendations for that location.")
+
+
+# ══════════════════════════════════════════════════════════════
+# TAB 7 — Agent (M4): profile → LLM extracts params → YOUR model ranks
+# ══════════════════════════════════════════════════════════════
+with tab7:
+    st.subheader("🤖 Agent — From Profile to Recommendation")
+    st.caption(
+        "The agent wraps the M3 model. You describe yourself in plain language; a Groq/Llama LLM "
+        "classifies that into **4 parameters** (city · budget · quality · user type); then **your "
+        "KMeans model** clusters and ranks venues and returns the **5 optimal** ones. "
+        "The numbers always come from the model — the LLM only translates input and output."
+    )
+
+    km_saved = load_model()
+    if km_saved is None:
+        st.warning("No trained model found. Open the **🔮 Predicted** tab and click *Train & Compare* first.")
+        st.stop()
+
+    cities_avail = sorted(df_all["city"].dropna().unique().tolist())
+
+    st.divider()
+    st.markdown("#### Step 1 — Your profile")
+    cprof1, cprof2 = st.columns(2)
+    with cprof1:
+        age = st.number_input("Age", min_value=14, max_value=99, value=23, step=1)
+        life_status = st.selectbox("Life status", ["student", "working", "retired", "other"])
+        max_budget = st.slider("Max budget for a shawarma (NIS)", 30, 90, 50, step=1)
+    with cprof2:
+        quality_pref = st.select_slider("Quality preference", ["low", "medium", "high"], value="high")
+        location_text = st.text_input(
+            "Where are you? (city — from your device GPS)",
+            value="חיפה",
+            help="On a phone this is filled from device GPS. Type a city or landmark.",
+        )
+
+    profile = {
+        "age": age,
+        "life_status": life_status,
+        "max_budget": max_budget,
+        "quality_pref": quality_pref,
+        "location": location_text,
+    }
+
+    api_key = st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else ""
+
+    st.divider()
+    st.markdown("#### Step 2 — Run the agent")
+    if not api_key:
+        st.info(
+            "No `GROQ_API_KEY` in `st.secrets` — running in **manual mode** (the form fields are used "
+            "directly as the 4 parameters, skipping the LLM). Add a free key to `.streamlit/secrets.toml` "
+            "to enable real free-text extraction. See `.streamlit/secrets.toml.example`."
+        )
+
+    if st.button("🥙 Find my shawarma", type="primary"):
+        params = None
+        if api_key:
+            with st.spinner("LLM extracting parameters…"):
+                params = extract_params(profile, api_key, cities_avail)
+
+        if params is None:
+            # Manual mode (no key) OR the LLM output failed validation → derive params from the form.
+            manual_city = location_text.strip() if location_text.strip() in cities_avail else None
+            params = {
+                "city": manual_city,
+                "max_budget_nis": int(max_budget),
+                "quality_preference": quality_pref,
+                "user_type": "student" if (life_status == "student" or age <= 26) else "quality",
+            }
+            st.session_state["agent_used_fallback"] = api_key != ""  # LLM tried but failed
+        else:
+            st.session_state["agent_used_fallback"] = False
+
+        st.session_state["agent_params"] = params
+
+    if "agent_params" in st.session_state:
+        params = st.session_state["agent_params"]
+
+        st.markdown("##### Extracted parameters (the 4 categories)")
+        pc1, pc2, pc3, pc4 = st.columns(4)
+        pc1.metric("מיקום · City", params["city"] or "—")
+        pc2.metric("סכום · Budget", f"₪{params['max_budget_nis']}")
+        pc3.metric("איכות · Quality", params["quality_preference"])
+        pc4.metric("סוג · User type", params["user_type"])
+
+        df_top = recommend(km_saved, df_all, params, top_n=5)
+
+        st.divider()
+        if not df_top.empty:
+            st.markdown(f"#### 🏆 Top {len(df_top)} venues for you")
+            disp = ["name", "city", "rating", "weighted_rating", "price_nis", "score"]
+            if "google_maps_url" in df_top.columns:
+                disp.append("google_maps_url")
+            out = df_top[disp].copy()
+            out["weighted_rating"] = out["weighted_rating"].round(2)
+            out["score"] = out["score"].round(2)
+            out.index = range(1, len(out) + 1)
+            st.dataframe(
+                out.rename(columns={
+                    "name": "Venue", "city": "City", "rating": "Rating",
+                    "weighted_rating": "Conf. ⭐", "price_nis": "Price (NIS)",
+                    "score": "Score", "google_maps_url": "Maps",
+                }),
+                use_container_width=True,
+                column_config={
+                    "Rating": st.column_config.NumberColumn(format="%.1f ⭐"),
+                    "Conf. ⭐": st.column_config.NumberColumn(format="%.2f"),
+                    "Price (NIS)": st.column_config.NumberColumn(format="₪%.0f"),
+                    "Maps": st.column_config.LinkColumn("Maps", display_text="Open ↗"),
+                },
+            )
+        else:
+            # Fallback path (point 3): ask only for the city, return best / cheapest / closest.
+            st.warning(
+                "The agent couldn't satisfy your profile (no venue matched the city + budget + quality). "
+                "Tell me the city you're in and I'll give you three solid picks."
+            )
+            fb_city = st.selectbox("Which city are you in?", cities_avail, key="agent_fb_city")
+            picks = fallback_recommend(df_all, fb_city)
+            if not picks:
+                st.error("No venues found for that city.")
+            else:
+                fc1, fc2, fc3 = st.columns(3)
+                labels = [("🏅 Best", "best"), ("🪙 Cheapest", "cheapest"), ("📍 Closest", "closest")]
+                for col, (title, key) in zip((fc1, fc2, fc3), labels):
+                    row = picks[key].iloc[0]
+                    with col:
+                        st.markdown(f"**{title}**")
+                        st.markdown(f"**{row['name']}**")
+                        st.caption(
+                            f"⭐ {row['rating']:.1f} · ₪{row['price_nis']:.0f} · {row['distance_km']:.2f} km"
+                        )
