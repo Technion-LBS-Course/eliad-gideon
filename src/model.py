@@ -9,10 +9,12 @@ import pandas as pd
 from sklearn.cluster import DBSCAN, AgglomerativeClustering, KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.model_selection import train_test_split
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neighbors import KNeighborsClassifier, NearestNeighbors
+from sklearn.metrics import confusion_matrix as _sk_cm
 from sklearn.preprocessing import StandardScaler
+from scipy.optimize import linear_sum_assignment
 
-FEATURE_COLS = ["price_nis", "rating", "reviews_count"]
+FEATURE_COLS = ["price_nis", "weighted_rating"]
 MODEL_PATH = Path(__file__).parent.parent / "data" / "kmeans_model.pkl"
 
 PERSONA_WEIGHTS = {
@@ -20,11 +22,25 @@ PERSONA_WEIGHTS = {
     "quality": {"price_nis": -0.5, "rating": 2.0, "distance_km": -0.5},
 }
 
+N_CLUSTERS = 9  # fixed — one cluster per target class
+
+TARGET_CLASSES = [
+    "good score - high price",
+    "good score - fair price",
+    "good score - low price",
+    "medium score - high price",
+    "medium score - fair price",
+    "medium score - low price",
+    "bad score - high price",
+    "bad score - fair price",
+    "bad score - low price",
+]
+
 
 def split_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """70/30 stratified train/test split on venues with valid price and rating."""
+    """80/20 train/test split on venues with valid price and rating."""
     df_valid = df.dropna(subset=["rating", "price_nis"]).copy()
-    df_train, df_test = train_test_split(df_valid, test_size=0.30, random_state=42)
+    df_train, df_test = train_test_split(df_valid, test_size=0.20, random_state=42)
     return df_train.reset_index(drop=True), df_test.reset_index(drop=True)
 
 
@@ -35,6 +51,31 @@ def _scale(
     X_train = scaler.fit_transform(df_train[FEATURE_COLS].fillna(0))
     X_test = scaler.transform(df_test[FEATURE_COLS].fillna(0))
     return X_train, X_test, scaler
+
+
+def _auto_eps(X: np.ndarray, min_samples: int) -> float:
+    """Estimate DBSCAN eps via the k-distance elbow: sort k-th NN distances, find max curvature.
+    Falls back to the median k-th distance when the range is too small to detect an elbow."""
+    nbrs = NearestNeighbors(n_neighbors=min_samples).fit(X)
+    kth_dist = np.sort(nbrs.kneighbors(X)[0][:, -1])
+    lo, hi = float(kth_dist.min()), float(kth_dist.max())
+    # Flat distribution — no elbow to detect; use median as a sensible default
+    if hi - lo < 1e-8:
+        return max(float(np.median(kth_dist)), 1e-3)
+    n = len(kth_dist)
+    x = np.linspace(0, 1, n)
+    y = (kth_dist - lo) / (hi - lo)
+    eps = float(kth_dist[int(np.argmax(np.abs(y - x)))])
+    return max(eps, 1e-3)  # guard against exact-zero edge cases
+
+
+def _random_baseline_silhouette(X: np.ndarray, k: int, random_state: int = 42) -> float:
+    """Silhouette score for random label assignment — the floor any real model must beat."""
+    rng = np.random.default_rng(random_state)
+    labels = rng.integers(0, k, len(X))
+    if len(np.unique(labels)) < 2:
+        return 0.0
+    return float(silhouette_score(X, labels))
 
 
 def find_best_k(X_train: np.ndarray, k_range=range(3, 9)) -> tuple[int, dict[int, float]]:
@@ -48,40 +89,41 @@ def find_best_k(X_train: np.ndarray, k_range=range(3, 9)) -> tuple[int, dict[int
 
 
 def train_kmeans(df_train: pd.DataFrame, df_test: pd.DataFrame) -> dict:
-    """Train KMeans with auto-tuned k; return model artifacts and train/test silhouette."""
+    """Train KMeans with k=N_CLUSTERS (9 — one per target class). No k sweep needed."""
     X_train, X_test, scaler = _scale(df_train, df_test)
-    best_k, k_scores = find_best_k(X_train)
 
-    model = KMeans(n_clusters=best_k, random_state=42, n_init="auto")
+    model = KMeans(n_clusters=N_CLUSTERS, random_state=42, n_init="auto")
     model.fit(X_train)
 
     train_sil = float(silhouette_score(X_train, model.labels_))
     test_sil = float(silhouette_score(X_test, model.predict(X_test)))
+    baseline_sil = _random_baseline_silhouette(X_test, N_CLUSTERS)
 
     return {
         "algorithm": "KMeans",
         "model": model,
         "scaler": scaler,
-        "k": best_k,
-        "k_scores": k_scores,
+        "k": N_CLUSTERS,
         "train_silhouette": train_sil,
         "test_silhouette": test_sil,
+        "baseline_silhouette": baseline_sil,
     }
 
 
 def train_dbscan(
-    df_train: pd.DataFrame, df_test: pd.DataFrame, eps: float = 0.5, min_samples: int = 5
+    df_train: pd.DataFrame, df_test: pd.DataFrame, min_samples: int = 5
 ) -> dict:
-    """Train DBSCAN; assign test labels via KNN on core samples for out-of-sample KPI."""
+    """Train DBSCAN; eps auto-tuned from the k-distance elbow on the training set."""
     X_train, X_test, scaler = _scale(df_train, df_test)
 
+    eps = _auto_eps(X_train, min_samples)
     model = DBSCAN(eps=eps, min_samples=min_samples)
     train_labels = model.fit_predict(X_train)
 
     mask_train = train_labels != -1
     noise_pct = float((~mask_train).mean() * 100)
 
-    if mask_train.sum() > 1:
+    if mask_train.sum() > 1 and len(np.unique(train_labels[mask_train])) > 1:
         train_sil = float(silhouette_score(X_train[mask_train], train_labels[mask_train]))
     else:
         train_sil = 0.0
@@ -109,14 +151,11 @@ def train_dbscan(
 
 
 def train_agglomerative(df_train: pd.DataFrame, df_test: pd.DataFrame) -> dict:
-    """Train AgglomerativeClustering (ward linkage) with auto-tuned k.
+    """Train AgglomerativeClustering (ward linkage) with k=N_CLUSTERS (9).
     Test labels assigned via 1-NN on training set (no native predict support)."""
     X_train, X_test, scaler = _scale(df_train, df_test)
 
-    # Reuse the same k sweep as KMeans for a fair comparison
-    best_k, k_scores = find_best_k(X_train)
-
-    model = AgglomerativeClustering(n_clusters=best_k, linkage="ward")
+    model = AgglomerativeClustering(n_clusters=N_CLUSTERS, linkage="ward")
     train_labels = model.fit_predict(X_train)
     train_sil = float(silhouette_score(X_train, train_labels))
 
@@ -131,47 +170,114 @@ def train_agglomerative(df_train: pd.DataFrame, df_test: pd.DataFrame) -> dict:
         "model": model,
         "knn": knn,           # kept for predict() fallback
         "scaler": scaler,
-        "k": best_k,
+        "k": N_CLUSTERS,
         "linkage": "ward",
         "train_silhouette": train_sil,
         "test_silhouette": test_sil,
     }
 
 
-def compare_algorithms(df: pd.DataFrame) -> tuple[dict, dict, dict]:
-    """Split data 70/30, train all three algorithms, return results for comparison."""
+def compare_algorithms(df: pd.DataFrame) -> tuple[dict, dict, dict, pd.DataFrame, pd.DataFrame]:
+    """Split data 80/20, train all three algorithms, return results + split DataFrames."""
     df_train, df_test = split_data(df)
     return (
         train_kmeans(df_train, df_test),
         train_dbscan(df_train, df_test),
         train_agglomerative(df_train, df_test),
+        df_train,
+        df_test,
     )
 
 
-def assign_cluster_labels(result: dict, df: pd.DataFrame) -> dict[int, str]:
-    """Map each cluster ID to a semantic label based on its centroid price and rating.
 
-    Uses dataset-wide 33rd/67th percentiles as thresholds so labels are relative
-    to the actual distribution rather than arbitrary absolute values.
+def _add_target_class(df_train: pd.DataFrame, df_test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Add 9-class target_class column to both splits.
+    Price thresholds (33rd/67th pct) computed on train set only to prevent leakage."""
+    p33 = float(df_train["price_nis"].quantile(0.33))
+    p67 = float(df_train["price_nis"].quantile(0.67))
+
+    def _label(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        score = np.select(
+            [df["weighted_rating"] >= 4.5, df["weighted_rating"] >= 3.0],
+            ["good score", "medium score"],
+            default="bad score",
+        )
+        price = np.select(
+            [df["price_nis"] >= p67, df["price_nis"] >= p33],
+            ["high price", "fair price"],
+            default="low price",
+        )
+        df["target_class"] = score + " - " + price
+        return df
+
+    return _label(df_train), _label(df_test)
+
+
+def compute_confusion_matrix(result: dict, df_train: pd.DataFrame, df_test: pd.DataFrame) -> dict:
+    """Map KMeans clusters to target classes (Hungarian matching on train) and evaluate on test."""
+    df_tr, df_te = _add_target_class(df_train, df_test)
+
+    X_tr = result["scaler"].transform(df_tr[FEATURE_COLS].fillna(0))
+    X_te = result["scaler"].transform(df_te[FEATURE_COLS].fillna(0))
+    train_cluster_ids = result["model"].predict(X_tr)
+    test_cluster_ids  = result["model"].predict(X_te)
+
+    present = [c for c in TARGET_CLASSES if c in df_tr["target_class"].values]
+    cls_idx = {c: i for i, c in enumerate(present)}
+
+    # Cost matrix: negative overlap between cluster k and class c on TRAIN set
+    cost = np.zeros((N_CLUSTERS, len(present)))
+    for k in range(N_CLUSTERS):
+        for j, c in enumerate(present):
+            cost[k, j] = -np.sum((train_cluster_ids == k) & (df_tr["target_class"] == c))
+
+    row_ind, col_ind = linear_sum_assignment(cost)
+    cluster_to_class = {int(r): present[c] for r, c in zip(row_ind, col_ind)}
+    # Fallback for unmatched clusters (should not occur with k=9 and 9 classes)
+    for k in range(N_CLUSTERS):
+        if k not in cluster_to_class:
+            mask = train_cluster_ids == k
+            counts = pd.Series(df_tr["target_class"].values[mask]).value_counts()
+            cluster_to_class[k] = counts.index[0] if len(counts) else present[0]
+
+    predicted = np.array([cluster_to_class[int(k)] for k in test_cluster_ids])
+    true_labels = df_te["target_class"].values
+
+    cm = _sk_cm(true_labels, predicted, labels=present)
+    accuracy = float((predicted == true_labels).mean())
+    return {
+        "confusion_matrix": cm,
+        "classes": present,
+        "accuracy": accuracy,
+        "cluster_to_class": cluster_to_class,
+        "price_p33": float(df_train["price_nis"].quantile(0.33)),
+        "price_p67": float(df_train["price_nis"].quantile(0.67)),
+    }
+
+def assign_cluster_labels(result: dict, df: pd.DataFrame) -> dict[int, str]:
+    """Map each cluster ID to a semantic label based on centroid weighted_rating and price.
+
+    Rating thresholds are fixed (not percentile-based) to produce interpretable, stable labels:
+      < 3.0  → Poor  |  3.0–4.5 → Average  |  ≥ 4.5 → Good
+    Price thresholds use dataset-wide 33rd/67th percentiles for relative positioning.
     """
     model = result["model"]
     scaler = result["scaler"]
 
     centroids = scaler.inverse_transform(model.cluster_centers_)
     price_idx = FEATURE_COLS.index("price_nis")
-    rating_idx = FEATURE_COLS.index("rating")
+    rating_idx = FEATURE_COLS.index("weighted_rating")
 
     price_33 = float(df["price_nis"].quantile(0.33))
     price_67 = float(df["price_nis"].quantile(0.67))
-    rating_33 = float(df["rating"].quantile(0.33))
-    rating_67 = float(df["rating"].quantile(0.67))
 
     def _rating_label(r: float) -> str:
-        if r >= rating_67:
+        if r >= 4.5:
             return "Good"
-        if r >= rating_33:
+        if r >= 3.0:
             return "Average"
-        return "Below Average"
+        return "Poor"
 
     def _price_label(p: float) -> str:
         if p >= price_67:
@@ -184,7 +290,6 @@ def assign_cluster_labels(result: dict, df: pd.DataFrame) -> dict[int, str]:
     seen: dict[str, int] = {}
     for cid, centroid in enumerate(centroids):
         base = f"{_rating_label(centroid[rating_idx])} & {_price_label(centroid[price_idx])}"
-        # Disambiguate duplicates with the centroid price
         label = base if base not in seen else f"{base} (₪{centroid[price_idx]:.0f})"
         labels[cid] = label
         seen[base] = cid

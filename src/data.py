@@ -46,11 +46,19 @@ def clean(df_raw: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["price_nis"] = df[PRICE_COLS].mean(axis=1, skipna=True)
+    df["price_nis"] = df.get("price_turkey_shawarma_pita", pd.NA)
     df["ratings_count"] = df["reviews_count"].fillna(0).astype(int)
     df["car_park_nearby"] = df["car_park_nearby"].map({"True": True, "False": False})
 
-    df["price_nis"] = df.get("price_turkey_shawarma_pita", pd.NA)
+    # Bayesian confidence-weighted rating: venues with < C reviews get pulled toward the global mean.
+    # When reviews_count = 0 (NaN source), weighted_rating = global mean → low confidence.
+    _C = 50
+    _global_mean = float(df["rating"].mean(skipna=True))
+    df["weighted_rating"] = np.where(
+        df["rating"].notna(),
+        (df["ratings_count"] * df["rating"] + _C * _global_mean) / (df["ratings_count"] + _C),
+        np.nan,
+    )
 
     df = df.dropna(subset=["lat", "lng"])
     df = df.drop_duplicates(subset=["name", "lat", "lng"])

@@ -12,8 +12,10 @@ from src.model import (
     assign_cluster_labels,
     assign_haifa_cluster_labels,
     compare_algorithms,
+    compute_confusion_matrix,
     HAIFA_FEATURE_COLS,
     load_model,
+    N_CLUSTERS,
     predict,
     predict_from_map,
     save_model,
@@ -404,14 +406,14 @@ with tab3:
 with tab4:
     st.subheader("KPI Definition")
     st.success(
-        "**The model is K-Means clustering (k=5), the metric is Silhouette Score ≥ 0.45, "
-        "because unsupervised venue segmentation has no ground-truth labels — "
-        "cohesion/separation ratio is the only objective measure of whether clusters "
-        "represent meaningfully distinct value profiles.**"
+        "**The model is K-Means clustering (k=9, fixed — one cluster per target class), "
+        "evaluated against a 9-class target (score tier × price tier). "
+        "Primary metric: Silhouette Score (unsupervised cohesion/separation). "
+        "Secondary metric: Confusion Matrix accuracy on the held-out 20% test set.**"
     )
 
     k1, k2, k3 = st.columns(3)
-    k1.metric("Target Silhouette Score", "≥ 0.45", "vs. random baseline ≈ 0.10")
+    k1.metric("Target Silhouette Score", "≥ 0.45", "vs. random baseline — computed per run")
     k2.metric("Persona Match Rate", "≥ 90%", "manual eval · 50 test cases")
     k3.metric("Response Time", "< 3 sec", "GPS lock → ranked list")
 
@@ -420,12 +422,12 @@ with tab4:
     st.markdown("""
 | Component | Definition |
 |-----------|-----------|
-| **Input X** | `[price_NIS, rating, distance_km, ratings_count]` — StandardScaler-normalized |
-| **Output y** | Cluster label per venue + persona-weighted ranking score |
-| **Algorithm** | K-Means · k tuned via Elbow + Silhouette on k ∈ {3…8} |
+| **Input X** | `[price_NIS, weighted_rating]` — Bayesian-smoothed rating + price, StandardScaler-normalized |
+| **Output y** | 9-class label: {good / medium / bad score} × {high / fair / low price} |
+| **Algorithm** | K-Means · k = 9 (fixed — one cluster per target class) |
 | **Loss / Objective** | Minimize intra-cluster variance; maximize inter-cluster separation |
-| **Train / Val / Test** | 70% / 15% / 15% stratified by city |
-| **Baseline** | Naïve sort by distance only — current Google Maps default |
+| **Train / Test** | 80% / 20% random split (`random_state=42`) |
+| **Baseline** | Random cluster assignment (same k = 9) — computed per run |
     """)
 
     st.divider()
@@ -468,31 +470,12 @@ with tab4:
 # TAB 5 — Predicted
 # ══════════════════════════════════════════════════════════════
 with tab5:
-    st.subheader("🔮 Predicted — Shawarma Cluster Finder")
+    st.subheader("🔮 Predicted — Shawarma Cluster Analysis")
     st.caption(
-        "The first stage of identifying your best shawarma: cluster all venues by price and rating, "
-        "choose the cluster that matches your expectations, then get a ranked list."
+        "Cluster all venues by **confidence-weighted rating** and **price**, then explore what features "
+        "define each cluster. Rating is Bayesian-smoothed by review count: venues with fewer reviews "
+        "are pulled toward the global mean — high review count = high confidence."
     )
-
-    # ── Settings ───────────────────────────────────────────────
-    st.markdown("#### Settings")
-    col_c, col_p, col_d = st.columns(3)
-    with col_c:
-        cities_list = sorted(df_all["city"].dropna().unique().tolist())
-        default_city = "תל אביב יפו" if "תל אביב יפו" in cities_list else cities_list[0]
-        user_city = st.selectbox("Your city", cities_list, index=cities_list.index(default_city))
-    with col_p:
-        persona = st.radio(
-            "Persona",
-            ["student", "quality"],
-            format_func=lambda x: {"student": "🎓 Student", "quality": "👑 Quality"}[x],
-        )
-    with col_d:
-        max_dist = st.slider("Max distance (km)", 0.5, 10.0, 2.0, step=0.5)
-
-    city_center = df_all.groupby("city")[["lat", "lng"]].mean()
-    user_lat = float(city_center.loc[user_city, "lat"])
-    user_lng = float(city_center.loc[user_city, "lng"])
 
     st.divider()
 
@@ -500,8 +483,8 @@ with tab5:
     st.markdown("#### Why These 3 Algorithms?")
     st.caption(
         "Three fundamentally different clustering paradigms were chosen to compare how well each "
-        "separates venues along the price–rating axis. All use the same features: "
-        "`[price_nis, rating, reviews_count]` — StandardScaler-normalized."
+        "separates venues along the price–weighted_rating axis. "
+        "Features: `[price_nis, weighted_rating]` — StandardScaler-normalized."
     )
 
     a1, a2, a3 = st.columns(3)
@@ -540,14 +523,16 @@ with tab5:
 
     # ── Train & Compare ────────────────────────────────────────
     st.markdown("#### Step 1 — Train & Compare Algorithms")
-    st.caption("70% train / 30% test split · k auto-tuned ∈ {3…8} via silhouette sweep · KPI: Silhouette Score")
+    st.caption("80% train / 20% test split · k = 9 (fixed — one cluster per target class) · KPI: Silhouette Score + Confusion Matrix accuracy")
 
     if st.button("🔬 Train & Compare Models", type="secondary"):
-        with st.spinner("Training KMeans, DBSCAN, and Agglomerative on 70% train split…"):
-            km_result, db_result, agg_result = compare_algorithms(df_all)
+        with st.spinner("Training KMeans, DBSCAN, and Agglomerative on 80% train split…"):
+            km_result, db_result, agg_result, df_tr, df_te = compare_algorithms(df_all)
             st.session_state["km_result"] = km_result
             st.session_state["db_result"] = db_result
             st.session_state["agg_result"] = agg_result
+            st.session_state["df_train"] = df_tr
+            st.session_state["df_test"] = df_te
             save_model(km_result)
 
     if "km_result" in st.session_state and "db_result" in st.session_state and "agg_result" in st.session_state:
@@ -555,31 +540,32 @@ with tab5:
         db = st.session_state["db_result"]
         agg = st.session_state["agg_result"]
 
-        # Comparison table
+        # Comparison table — includes random baseline row so the panel can verify we beat it
+        baseline_sil = round(km.get("baseline_silhouette", 0.0), 3)
         cmp_data = {
-            "Algorithm": ["KMeans", "DBSCAN", "Agglomerative"],
-            "Paradigm": ["Partitional", "Density-based", "Hierarchical (ward)"],
+            "Algorithm": ["Random baseline", "KMeans", "DBSCAN", "Agglomerative"],
+            "Paradigm": ["—", "Partitional", "Density-based", "Hierarchical (ward)"],
             "Hyperparameters": [
-                f"k = {km['k']} (auto-tuned)",
-                f"eps = {db['eps']}, min_samples = {db['min_samples']}",
-                f"k = {agg['k']} (auto-tuned), linkage = ward",
+                f"k = {km['k']} (same as KMeans), random labels",
+                f"k = {km['k']} (fixed — 9 target classes)",
+                f"eps = {db['eps']:.3f} (auto-tuned), min_samples = {db['min_samples']}",
+                f"k = {agg['k']} (fixed), linkage = ward",
             ],
-            "Train Silhouette": [
-                round(km["train_silhouette"], 3),
-                round(db["train_silhouette"], 3),
-                round(agg["train_silhouette"], 3),
-            ],
-            "Test Silhouette": [
-                round(km["test_silhouette"], 3),
-                round(db["test_silhouette"], 3),
-                round(agg["test_silhouette"], 3),
+            "Train Silhouette": ["—", round(km["train_silhouette"], 3), round(db["train_silhouette"], 3), round(agg["train_silhouette"], 3)],
+            "Test Silhouette": [baseline_sil, round(km["test_silhouette"], 3), round(db["test_silhouette"], 3), round(agg["test_silhouette"], 3)],
+            "Beats baseline": [
+                "—",
+                "✅" if km["test_silhouette"] > baseline_sil else "❌",
+                "✅" if db["test_silhouette"] > baseline_sil else "❌",
+                "✅" if agg["test_silhouette"] > baseline_sil else "❌",
             ],
             "Meets KPI ≥ 0.45": [
+                "❌",
                 "✅" if km["test_silhouette"] >= 0.45 else "❌",
                 "✅" if db["test_silhouette"] >= 0.45 else "❌",
                 "✅" if agg["test_silhouette"] >= 0.45 else "❌",
             ],
-            "predict() support": ["✅ native", "❌ KNN fallback", "❌ KNN fallback"],
+            "predict() support": ["—", "✅ native", "❌ KNN fallback", "❌ KNN fallback"],
         }
         st.dataframe(pd.DataFrame(cmp_data), use_container_width=True, hide_index=True)
 
@@ -602,46 +588,64 @@ This compresses the price axis and makes it hard for any algorithm to produce we
 DBSCAN's higher score (0.71) is partly because it only evaluates non-noise points, which inflates the metric.
             """)
 
-        # Elbow chart
-        col_elbow, col_scatter = st.columns(2)
-        with col_elbow:
-            k_vals = list(km["k_scores"].keys())
-            sil_vals = list(km["k_scores"].values())
-            fig_elbow = px.line(
-                x=k_vals, y=sil_vals, markers=True,
-                labels={"x": "k (clusters)", "y": "Silhouette Score"},
-                title=f"Silhouette sweep — best k = {km['k']}",
-                color_discrete_sequence=["#2a9d8f"],
-            )
-            fig_elbow.add_vline(
-                x=km["k"], line_dash="dash", line_color="#e76f51",
-                annotation_text=f"k={km['k']}",
-                annotation_position="top right",
-            )
-            fig_elbow.update_layout(yaxis_range=[0, 1], height=350)
-            st.plotly_chart(fig_elbow, use_container_width=True)
+        # Target class vs cluster scatter (two-panel comparison)
+        col_truth, col_pred = st.columns(2)
+        from src.model import FEATURE_COLS as _FC
 
-        # Cluster scatter: price vs rating coloured by cluster label
-        with col_scatter:
-            cluster_labels = assign_cluster_labels(km, df_all)
-            df_sample = df_all.dropna(subset=["price_nis", "rating"]).sample(
-                min(2000, len(df_all)), random_state=42
-            ).copy()
-            from src.model import FEATURE_COLS as _FC
-            X_sample = km["scaler"].transform(df_sample[_FC].fillna(0))
-            df_sample["cluster_id"] = km["model"].predict(X_sample)
-            df_sample["cluster_label"] = df_sample["cluster_id"].map(cluster_labels)
-            fig_scatter = px.scatter(
-                df_sample, x="price_nis", y="rating",
-                color="cluster_label",
-                opacity=0.5,
-                labels={"price_nis": "Price (NIS)", "rating": "Rating", "cluster_label": "Cluster"},
-                title="Clusters — Price vs Rating",
-                height=350,
+        df_sample = df_all.dropna(subset=["price_nis", "weighted_rating"]).sample(
+            min(2000, len(df_all)), random_state=42
+        ).copy()
+        # True classes on sample
+        if "df_train" in st.session_state:
+            df_tr_s = st.session_state["df_train"]
+            p33_s = float(df_tr_s["price_nis"].quantile(0.33))
+            p67_s = float(df_tr_s["price_nis"].quantile(0.67))
+        else:
+            p33_s = float(df_all["price_nis"].quantile(0.33))
+            p67_s = float(df_all["price_nis"].quantile(0.67))
+        score_s = np.select(
+            [df_sample["weighted_rating"] >= 4.5, df_sample["weighted_rating"] >= 3.0],
+            ["good score", "medium score"], default="bad score",
+        )
+        price_s = np.select(
+            [df_sample["price_nis"] >= p67_s, df_sample["price_nis"] >= p33_s],
+            ["high price", "fair price"], default="low price",
+        )
+        df_sample["target_class"] = score_s + " - " + price_s
+
+        with col_truth:
+            fig_truth = px.scatter(
+                df_sample, x="price_nis", y="weighted_rating",
+                color="target_class",
+                opacity=0.45,
+                labels={"price_nis": "Price (NIS)", "weighted_rating": "Conf. Rating", "target_class": "True Class"},
+                title="Ground truth — 9 target classes",
+                height=380,
             )
-            fig_scatter.update_traces(marker_size=4)
-            fig_scatter.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.4))
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            fig_truth.add_hline(y=4.5, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="4.5")
+            fig_truth.add_hline(y=3.0, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="3.0")
+            fig_truth.update_traces(marker_size=4)
+            fig_truth.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.55, font_size=9))
+            st.plotly_chart(fig_truth, use_container_width=True)
+
+        cluster_labels = assign_cluster_labels(km, df_all)
+        X_sample = km["scaler"].transform(df_sample[_FC].fillna(0))
+        df_sample["cluster_id"] = km["model"].predict(X_sample)
+        df_sample["cluster_label"] = df_sample["cluster_id"].map(cluster_labels)
+        with col_pred:
+            fig_pred = px.scatter(
+                df_sample, x="price_nis", y="weighted_rating",
+                color="cluster_label",
+                opacity=0.45,
+                labels={"price_nis": "Price (NIS)", "weighted_rating": "Conf. Rating", "cluster_label": "KMeans Cluster"},
+                title="KMeans prediction — 9 clusters",
+                height=380,
+            )
+            fig_pred.add_hline(y=4.5, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="4.5")
+            fig_pred.add_hline(y=3.0, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="3.0")
+            fig_pred.update_traces(marker_size=4)
+            fig_pred.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.55, font_size=9))
+            st.plotly_chart(fig_pred, use_container_width=True)
 
         # Winner rationale
         st.success(
@@ -655,94 +659,190 @@ DBSCAN's higher score (0.71) is partly because it only evaluates non-noise point
             f"Model saved → `data/kmeans_model.pkl`."
         )
 
-    st.divider()
-
-    # ── Predicted Recommendations ──────────────────────────────
-    st.markdown("#### Step 2 — Choose Your Cluster & Find Your Shawarma")
-
-    if "km_result" not in st.session_state:
-        persisted = load_model()
-        if persisted:
-            st.session_state["km_result"] = persisted
-
-    if "km_result" in st.session_state:
-        km_loaded = st.session_state["km_result"]
-        cluster_labels_loaded = assign_cluster_labels(km_loaded, df_all)
-
-        # Build label options with venue counts for context
-        df_labeled = df_all.dropna(subset=["price_nis", "rating"]).copy()
-        from src.model import FEATURE_COLS as _FC2
-        X_all = km_loaded["scaler"].transform(df_labeled[_FC2].fillna(0))
-        df_labeled["cluster_id"] = km_loaded["model"].predict(X_all)
-        df_labeled["cluster_label"] = df_labeled["cluster_id"].map(cluster_labels_loaded)
-        label_counts = df_labeled["cluster_label"].value_counts().to_dict()
-
-        label_options = sorted(
-            cluster_labels_loaded.values(),
-            key=lambda lbl: (
-                0 if "Good" in lbl else (1 if "Average" in lbl else 2),
-                0 if "Affordable" in lbl else (1 if "Reasonable" in lbl else 2),
-            ),
+        # ── Confusion Matrix ───────────────────────────────────
+        st.divider()
+        st.markdown("#### Confusion Matrix — KMeans vs Target Classes (test set)")
+        st.caption(
+            "Cluster IDs are mapped to target classes via **Hungarian matching** on the training set "
+            "(finds the 1-to-1 assignment that maximises overlap). Evaluated on the held-out 20% test set."
         )
-        label_options_display = [
-            f"{lbl}  ({label_counts.get(lbl, 0):,} venues)" for lbl in label_options
-        ]
 
-        selected_display = st.selectbox(
-            "Select the cluster that matches your expectations",
-            label_options_display,
-            help="Clusters are defined by their centroid price and rating relative to the full dataset distribution.",
-        )
-        selected_label = selected_display.split("  (")[0]
+        if "df_train" in st.session_state and "df_test" in st.session_state:
+            with st.spinner("Computing confusion matrix…"):
+                cm_data = compute_confusion_matrix(
+                    km,
+                    st.session_state["df_train"],
+                    st.session_state["df_test"],
+                )
+            cm_arr = cm_data["confusion_matrix"]
+            cm_classes = cm_data["classes"]
+            acc = cm_data["accuracy"]
 
-        if st.button("🥙 Find My Shawarma", type="primary"):
-            result = st.session_state["km_result"]
-            df_recs = predict(
-                result, df_all,
-                persona=persona,
-                user_lat=user_lat,
-                user_lng=user_lng,
-                max_dist_km=max_dist,
+            st.metric("Test accuracy (class match rate)", f"{acc:.1%}")
+
+            # Normalised heatmap
+            cm_norm = cm_arr.astype(float) / cm_arr.sum(axis=1, keepdims=True).clip(min=1)
+            fig_cm = px.imshow(
+                cm_norm,
+                x=cm_classes,
+                y=cm_classes,
+                color_continuous_scale="Blues",
+                zmin=0, zmax=1,
+                text_auto=".0%",
+                aspect="auto",
+                labels={"x": "Predicted (KMeans)", "y": "True class", "color": "Row %"},
+                title=f"Confusion Matrix — normalised by row · accuracy {acc:.1%}",
+                height=520,
             )
-            # Filter to selected cluster label
-            if not df_recs.empty:
-                df_recs["cluster_label"] = df_recs["cluster"].map(cluster_labels_loaded)
-                df_recs = df_recs[df_recs["cluster_label"] == selected_label]
+            fig_cm.update_xaxes(tickangle=35)
+            fig_cm.update_layout(margin=dict(l=0, r=0, b=120))
+            st.plotly_chart(fig_cm, use_container_width=True)
 
-            if df_recs.empty:
-                st.info(
-                    f"No **{selected_label}** venues found within {max_dist} km of {user_city}. "
-                    f"Try a different cluster, increasing the distance, or selecting a larger city."
-                )
-            else:
-                st.success(
-                    f"Found **{len(df_recs):,}** venues in cluster **{selected_label}** "
-                    f"within {max_dist} km · showing top 10"
-                )
-                display_cols = ["name", "city", "rating", "price_nis", "distance_km", "cluster_label", "score"]
-                if "google_maps_url" in df_recs.columns:
-                    display_cols.append("google_maps_url")
-                top10 = df_recs.head(10)[display_cols].copy()
-                top10["distance_km"] = top10["distance_km"].round(2)
-                top10["score"] = top10["score"].round(2)
-                top10.index = range(1, len(top10) + 1)
+            with st.expander("Raw counts"):
                 st.dataframe(
-                    top10.rename(columns={
-                        "name": "Venue", "city": "City", "rating": "Rating",
-                        "price_nis": "Price (NIS)", "distance_km": "Dist (km)",
-                        "cluster_label": "Cluster", "score": "Score",
-                        "google_maps_url": "Maps",
-                    }),
+                    pd.DataFrame(cm_arr, index=cm_classes, columns=cm_classes),
                     use_container_width=True,
-                    column_config={
-                        "Rating": st.column_config.NumberColumn(format="%.1f ⭐"),
-                        "Price (NIS)": st.column_config.NumberColumn(format="₪%.0f"),
-                        "Dist (km)": st.column_config.NumberColumn(format="%.2f km"),
-                        "Maps": st.column_config.LinkColumn("Maps", display_text="Open ↗"),
-                    },
                 )
-    else:
-        st.info("Run Step 1 first to train the model and unlock cluster selection.")
+        else:
+            st.info("Confusion matrix will appear after training.")
+
+        # ── Cluster Analysis Dashboard ─────────────────────────
+        st.divider()
+        st.markdown("#### Cluster Analysis — What Defines Each Cluster?")
+        st.caption(
+            "Rating thresholds: **Good** ≥ 4.5 · **Medium** 3.0–4.5 · **Bad** < 3.0 (confidence-adjusted). "
+            "Price thresholds: **High** > 67th pct · **Fair** 33–67th pct · **Low** < 33rd pct."
+        )
+
+        from src.model import FEATURE_COLS as _FC3
+        cluster_labels_full = assign_cluster_labels(km, df_all)
+        df_full = df_all.dropna(subset=["price_nis", "weighted_rating"]).copy()
+        X_full = km["scaler"].transform(df_full[_FC3].fillna(0))
+        df_full["cluster_id"] = km["model"].predict(X_full)
+        df_full["cluster_label"] = df_full["cluster_id"].map(cluster_labels_full)
+
+        # Summary table — one row per cluster
+        summary_rows = []
+        for cid, lbl in sorted(cluster_labels_full.items()):
+            df_c = df_full[df_full["cluster_id"] == cid]
+            summary_rows.append({
+                "Cluster": lbl,
+                "Venues": len(df_c),
+                "Avg Price (₪)": round(df_c["price_nis"].mean(), 1),
+                "Price IQR (₪)": round(df_c["price_nis"].quantile(0.75) - df_c["price_nis"].quantile(0.25), 1),
+                "Avg Raw Rating": round(df_c["rating"].mean(), 2),
+                "Avg Conf. Rating": round(df_c["weighted_rating"].mean(), 2),
+                "Avg Reviews": int(df_c["ratings_count"].mean()),
+            })
+        st.dataframe(
+            pd.DataFrame(summary_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Avg Raw Rating": st.column_config.NumberColumn(format="%.2f ⭐"),
+                "Avg Conf. Rating": st.column_config.NumberColumn(format="%.2f ⭐"),
+                "Avg Price (₪)": st.column_config.NumberColumn(format="₪%.1f"),
+                "Price IQR (₪)": st.column_config.NumberColumn(format="₪%.1f"),
+            },
+        )
+
+        # Full scatter: all venues, size = reviews_count where meaningful
+        has_reviews = df_full["ratings_count"].gt(0).any()
+        fig_full = px.scatter(
+            df_full.sample(min(4000, len(df_full)), random_state=42),
+            x="price_nis",
+            y="weighted_rating",
+            color="cluster_label",
+            size="ratings_count" if has_reviews else None,
+            size_max=15,
+            opacity=0.45,
+            hover_name="name",
+            hover_data={"city": True, "price_nis": True, "rating": True,
+                        "weighted_rating": True, "ratings_count": True,
+                        "cluster_label": False},
+            labels={
+                "price_nis": "Price (NIS)",
+                "weighted_rating": "Confidence-weighted Rating",
+                "ratings_count": "Reviews",
+                "cluster_label": "Cluster",
+            },
+            title="All venues — Price × Confidence-weighted Rating (point size = review count)",
+            height=480,
+        )
+        fig_full.add_hline(y=4.5, line_dash="dot", line_color="#2a9d8f",
+                           annotation_text="4.5 — Good threshold")
+        fig_full.add_hline(y=3.0, line_dash="dot", line_color="#e76f51",
+                           annotation_text="3.0 — Poor threshold")
+        fig_full.update_traces(marker_line_width=0)
+        fig_full.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.25))
+        st.plotly_chart(fig_full, use_container_width=True)
+
+        # Per-cluster deep-dives
+        st.markdown("#### Per-Cluster Deep-Dive")
+        _RATING_EMOJI = {"Good": "🟢", "Average": "🟡", "Poor": "🔴"}
+        _PRICE_EMOJI = {"Expensive": "💸", "Reasonable": "💰", "Affordable": "🪙"}
+
+        for cid, lbl in sorted(cluster_labels_full.items()):
+            df_c = df_full[df_full["cluster_id"] == cid]
+            rating_tier = next((t for t in ("Good", "Average", "Poor") if t in lbl), "")
+            price_tier = next((t for t in ("Expensive", "Reasonable", "Affordable") if t in lbl), "")
+            emoji = _RATING_EMOJI.get(rating_tier, "⚪") + " " + _PRICE_EMOJI.get(price_tier, "")
+
+            with st.expander(f"{emoji}  **{lbl}** — {len(df_c):,} venues", expanded=False):
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Venues", f"{len(df_c):,}")
+                c2.metric("Avg Price", f"₪{df_c['price_nis'].mean():.0f}")
+                c3.metric("Price range", f"₪{df_c['price_nis'].min():.0f}–₪{df_c['price_nis'].max():.0f}")
+                c4.metric("Raw Rating", f"{df_c['rating'].mean():.2f} ⭐")
+                c5.metric("Conf. Rating", f"{df_c['weighted_rating'].mean():.2f} ⭐",
+                          delta=f"{df_c['weighted_rating'].mean() - df_c['rating'].mean():.2f} vs raw",
+                          delta_color="normal")
+
+                st.caption(
+                    f"**Price IQR:** ₪{df_c['price_nis'].quantile(0.25):.0f}–₪{df_c['price_nis'].quantile(0.75):.0f}  ·  "
+                    f"**Rating std:** {df_c['rating'].std():.2f}  ·  "
+                    f"**Avg reviews:** {df_c['ratings_count'].mean():.0f}  ·  "
+                    f"**Cities represented:** {df_c['city'].nunique()}"
+                )
+
+                # Rating distribution within cluster
+                col_hist, col_top = st.columns([1, 1])
+                with col_hist:
+                    fig_hist = px.histogram(
+                        df_c, x="weighted_rating", nbins=20,
+                        labels={"weighted_rating": "Confidence-weighted Rating", "count": "Venues"},
+                        color_discrete_sequence=["#2a9d8f"],
+                        height=260,
+                        title="Rating distribution",
+                    )
+                    fig_hist.add_vline(x=df_c["weighted_rating"].mean(), line_dash="dash",
+                                       line_color="#e76f51", annotation_text="mean")
+                    fig_hist.update_layout(showlegend=False, margin=dict(t=40, b=0))
+                    st.plotly_chart(fig_hist, use_container_width=True)
+
+                with col_top:
+                    st.markdown("**Top 10 venues (by confidence-weighted rating)**")
+                    top_cols = ["name", "city", "rating", "weighted_rating", "price_nis", "ratings_count"]
+                    if "google_maps_url" in df_c.columns:
+                        top_cols.append("google_maps_url")
+                    top10 = df_c.nlargest(10, "weighted_rating")[top_cols].copy()
+                    top10["weighted_rating"] = top10["weighted_rating"].round(2)
+                    top10["price_nis"] = top10["price_nis"].round(0).astype(int)
+                    top10.index = range(1, len(top10) + 1)
+                    st.dataframe(
+                        top10.rename(columns={
+                            "name": "Venue", "city": "City",
+                            "rating": "Raw ⭐", "weighted_rating": "Conf. ⭐",
+                            "price_nis": "₪", "ratings_count": "Reviews",
+                            "google_maps_url": "Maps",
+                        }),
+                        use_container_width=True,
+                        column_config={
+                            "Raw ⭐": st.column_config.NumberColumn(format="%.1f"),
+                            "Conf. ⭐": st.column_config.NumberColumn(format="%.2f"),
+                            "Maps": st.column_config.LinkColumn("Maps", display_text="Open ↗"),
+                        },
+                    )
 
 
 # ══════════════════════════════════════════════════════════════

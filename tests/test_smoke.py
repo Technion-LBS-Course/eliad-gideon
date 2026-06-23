@@ -41,7 +41,7 @@ def test_train_kmeans_returns_scores():
     assert result["algorithm"] == "KMeans"
     assert 0 < result["train_silhouette"] < 1
     assert 0 < result["test_silhouette"] < 1
-    assert 3 <= result["k"] <= 8
+    assert result["k"] == 9  # fixed — one cluster per target class
 
 
 def test_predict_returns_ranked_list():
@@ -61,7 +61,7 @@ def test_train_agglomerative_returns_scores():
     assert result["linkage"] == "ward"
     assert 0 < result["train_silhouette"] < 1
     assert 0 < result["test_silhouette"] < 1
-    assert 3 <= result["k"] <= 8
+    assert result["k"] == 9  # fixed — one cluster per target class
 
 
 def test_predict_empty_on_impossible_location():
