@@ -1106,7 +1106,11 @@ with tab7:
         "location": location_text,
     }
 
-    api_key = st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else ""
+    # st.secrets raises (not returns) when no secrets.toml exists anywhere — guard it.
+    try:
+        api_key = st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        api_key = ""
 
     st.divider()
     st.markdown("#### Step 2 — Run the agent")
