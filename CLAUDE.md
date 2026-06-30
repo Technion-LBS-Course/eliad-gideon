@@ -23,24 +23,24 @@ ML-powered app that recommends the best shawarma venue near the user by clusteri
 ### Algorithms trained & compared (80 / 20 train/test split, `random_state=42`)
 | Algorithm | Paradigm | Train Silhouette | Test Silhouette | predict() |
 |-----------|----------|-----------------|----------------|-----------|
-| **KMeans** (k=9, fixed) | Partitional | ~0.37 | ~0.37 | ✅ native |
-| DBSCAN (eps auto-tuned, min_samples=5) | Density-based | ~0.73 | ~0.71 | ❌ KNN fallback |
-| Agglomerative (ward, k=9) | Hierarchical | ~0.37 | ~0.37 | ❌ KNN fallback |
+| **KMeans** (k=9, fixed) | Partitional | ~0.59 | ~0.58 | ✅ native |
+| DBSCAN (eps auto-tuned, min_samples=5) | Density-based | ~1.00 | ~0.68 | ❌ KNN fallback |
+| Agglomerative (ward, k=9) | Hierarchical | ~0.57 | ~0.57 | ❌ KNN fallback |
 
 - **Selected model:** KMeans — only algorithm with native `predict()` for new venues
 - **Input features:** `[price_nis, weighted_rating]` — StandardScaler-normalized. `weighted_rating` is a Bayesian confidence-smoothed rating (pulled toward the global mean when `reviews_count` is missing). Distance is computed at query time, not used in clustering.
 - **k is fixed at 9** — one cluster per target class: {good / medium / bad score} × {high / fair / low price}. Clusters are mapped to those 9 classes via Hungarian matching for a confusion-matrix accuracy readout.
 - **Output:** cluster label per venue + persona-weighted ranking score
-- **Success metric:** Silhouette Score ≥ 0.45 on test split (DBSCAN meets it; KMeans ~0.37 due to the tight ₪5 IQR price band) + 9-class confusion-matrix accuracy
+- **Success metric:** Silhouette Score ≥ 0.45 on test split + 9-class confusion-matrix accuracy. All three algorithms clear 0.45 (KMeans ~0.58; because `weighted_rating` is near-constant the clustering is effectively price-driven, which separates cleanly). DBSCAN's ~0.68 is inflated (computed on non-noise points only) and it can't generalize without a KNN fallback — hence KMeans is still selected.
 - **Baseline to beat:** random cluster assignment (same k=9), computed per run
 - **Saved model:** `data/kmeans_model.pkl` (auto-loaded by Streamlit on next run)
 
 ## Agent Layer (M4 — implemented)
-The agent **wraps** the M3 model; it never invents numbers. Four-step loop:
+The agent **wraps** the M3 model; it never invents numbers — the LLM translates input and output, the model decides. Four-step loop:
 1. User describes themselves in **free text** (Hebrew or English) in the 🤖 Agent tab.
-2. A Groq/Llama LLM (`llama-3.3-70b-versatile`, `temperature=0`) classifies the text into **4 parameters** as strict JSON: `city` (מיקום), `max_budget_nis` (סכום), `quality_preference` (איכות), `user_type` (סוג משתמש).
-3. The **saved KMeans model** assigns clusters and ranks the surviving venues by persona-weighted score → **top 5**.
-4. **Validation + fallback:** invalid LLM output (bad JSON, out-of-range, unknown city) is caught; the agent then asks only for the city and returns three safe picks — **best / cheapest / closest**.
+2. A Groq/Llama LLM (`llama-3.3-70b-versatile`, `temperature=0`) classifies the text into **4 parameters** as strict JSON: `city` (מיקום), `max_budget_nis` (סכום), `quality_preference` (איכות), `user_type` (סוג משתמש). Invalid output (bad JSON / out-of-range / unknown city) → fallback: ask only for the city and return **best / cheapest / closest**.
+3. **The model selects.** `recommend()` builds the user's *ideal venue* from real data quantiles and calls `model.predict()` on it; the cluster the model assigns to that ideal is the target, and the agent returns real venues the model placed in that same cluster. Persona weights only **order within** the model-chosen cluster — they never override which cluster the model picked. → **top 5**.
+4. **The LLM phrases the model's output** (`phrase_response`, `temperature=0.3`): it is handed the exact venues the model chose and may only restate them in the user's language — never invent, add, drop, or change a venue/price/rating. Rendered as a chat reply above the evidence table.
 - Groq is **OpenAI-compatible, not Anthropic** — use `client.chat.completions.create`, not `messages.create`.
 - Quality filtering uses raw `rating` (not `weighted_rating`, which collapses to the global mean for the ~95% of venues lacking a review count).
 - Key lives in `st.secrets["GROQ_API_KEY"]` via `.streamlit/secrets.toml` (git-ignored). Without a key the tab uses the city fallback only.
@@ -56,7 +56,8 @@ src/model.py           — split_data(), find_best_k(), train_kmeans(), train_db
                          save_model(), load_model(), predict()
 src/agent.py           — M4 agent: build_system_prompt(), build_user_prompt(),
                          extract_params() (Groq LLM), validate_params(),
-                         recommend() (top-5 via model), fallback_recommend()
+                         recommend() (model picks cluster → top-5), fallback_recommend(),
+                         phrase_response() (LLM restates the model's picks)
 data/dataset.csv       — 12,270 clean venues (committed)
 data/kmeans_model.pkl  — trained KMeans model (committed; regenerate with Train button)
 .streamlit/secrets.toml          — GROQ_API_KEY (git-ignored; never commit)

@@ -37,9 +37,11 @@
 - [x] System + user prompts; Groq/Llama (`llama-3.3-70b-versatile`, `temperature=0`, OpenAI-compatible)
 - [x] LLM classifies free text into 4 params: city · budget · quality · user_type (strict JSON)
 - [x] Output validation + Fallback (ask for city → best / cheapest / closest)
-- [x] `recommend()` runs the model's `predict()` and returns the top-5 venues
+- [x] Model-driven selection: `recommend()` calls `model.predict()` on the user's ideal point to pick the cluster, then returns venues from that cluster (top-5)
+- [x] Step 4 — `phrase_response()`: LLM restates the model's picks in the user's language (no inventing)
 - [x] 🤖 Agent tab with free-text input; key in `st.secrets` (`.streamlit/secrets.toml`, git-ignored)
 - [x] Remove 🗺️ Haifa tab; drop unused `folium` / `streamlit-folium` deps
+- [x] Deploy-prep: pin numpy/scipy, retrain model under sklearn 1.5.2
 
 ## M5 · Evaluation & Presentation 🔲 (weeks 8–9)
 - [ ] Final Silhouette Score report

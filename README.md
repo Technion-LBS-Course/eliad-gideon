@@ -88,11 +88,11 @@ Israel's shawarma market has 12,000+ venues with prices ranging ₪37–₪58 pe
 
 | Algorithm | Paradigm | Hyperparameters | Train Silhouette | Test Silhouette | Meets KPI ≥ 0.45 |
 |-----------|----------|----------------|-----------------|----------------|-----------------|
-| **KMeans** | Partitional | k=9 (fixed — one per target class) | ~0.37 | ~0.37 | ❌ |
-| **DBSCAN** | Density-based | eps auto-tuned, min_samples=5 | ~0.73 | ~0.71 | ✅ |
-| **Agglomerative** | Hierarchical | k=9 (ward linkage) | ~0.37 | ~0.37 | ❌ |
+| **KMeans** | Partitional | k=9 (fixed — one per target class) | ~0.59 | ~0.58 | ✅ |
+| **DBSCAN** | Density-based | eps auto-tuned, min_samples=5 | ~1.00 | ~0.68 | ✅ |
+| **Agglomerative** | Hierarchical | k=9 (ward linkage) | ~0.57 | ~0.57 | ✅ |
 
-**Selected model: KMeans (k=9)** — only algorithm with native `predict()` for new venues. DBSCAN achieves a higher silhouette but cannot generalize out-of-sample without a KNN fallback (and its score is inflated by being computed on non-noise points only). The low KMeans silhouette reflects the dataset's narrow ₪5 IQR price band, which limits cluster separability. k is fixed at 9 so each cluster maps to one target class — {good / medium / bad score} × {high / fair / low price} — enabling a confusion-matrix accuracy readout via Hungarian matching.
+**Selected model: KMeans (k=9)** — the only algorithm with native `predict()` for new venues. All three clear the 0.45 KPI; because `weighted_rating` is near-constant the clustering is effectively price-driven and separates cleanly (KMeans ~0.58). DBSCAN's ~0.68 is inflated (computed on non-noise points only) and it cannot generalize out-of-sample without a KNN fallback, so KMeans wins on deployability. k is fixed at 9 so each cluster maps to one target class — {good / medium / bad score} × {high / fair / low price} — enabling a confusion-matrix accuracy readout via Hungarian matching.
 
 ### Train / Test Split
 - **Split:** 80% train / 20% test, `random_state=42`
@@ -112,11 +112,11 @@ Israel's shawarma market has 12,000+ venues with prices ranging ₪37–₪58 pe
 The agent **wraps** the M3 model — it translates language, the model produces the numbers. Loop:
 
 1. **Free text in** — in the **🤖 Agent** tab you describe yourself in your own words (Hebrew or English), e.g. *"אני סטודנט בן 23 בחיפה, תקציב עד 50 ש"ח, רוצה את האיכות הכי גבוהה"*.
-2. **LLM extracts 4 parameters** — a Groq/Llama model (`llama-3.3-70b-versatile`, `temperature=0`) returns strict JSON: `city` (מיקום) · `max_budget_nis` (סכום) · `quality_preference` (איכות) · `user_type` (סוג משתמש).
-3. **Your model ranks** — the saved KMeans model clusters the matching venues and ranks them by persona-weighted score → **top 5**.
-4. **Fallback** — if the LLM output is invalid (bad JSON / out of range / unknown city), the agent asks only for the city and returns **best / cheapest / closest**.
+2. **LLM extracts 4 parameters** — a Groq/Llama model (`llama-3.3-70b-versatile`, `temperature=0`) returns strict JSON: `city` (מיקום) · `max_budget_nis` (סכום) · `quality_preference` (איכות) · `user_type` (סוג משתמש). Invalid output (bad JSON / out of range / unknown city) → **fallback**: ask only for the city and return **best / cheapest / closest**.
+3. **Your model selects** — `recommend()` builds the user's *ideal venue* from real data quantiles and calls `model.predict()` on it; the cluster the model assigns becomes the target, and the agent returns real venues the model placed in that same cluster. Persona weights only **order within** the model-chosen cluster. → **top 5**.
+4. **LLM phrases the model's output** — `phrase_response()` (`temperature=0.3`) is handed the exact venues the model picked and restates them in the user's language; it cannot invent, add, drop, or change a venue/price/rating. Shown as a chat reply above the table.
 
-Implemented in `src/agent.py`. Groq is **OpenAI-compatible** (`chat.completions.create`). The key is read from `st.secrets["GROQ_API_KEY"]` (see *How to Run*).
+Implemented in `src/agent.py`. The LLM translates **input and output**; the venues and numbers always come from your model. Groq is **OpenAI-compatible** (`chat.completions.create`). The key is read from `st.secrets["GROQ_API_KEY"]` (see *How to Run*).
 
 ---
 
@@ -157,7 +157,8 @@ src/
 │                             compute_confusion_matrix(), save_model(), load_model(), predict()
 └── agent.py                — M4 agent: build_system_prompt(), build_user_prompt(),
                               extract_params() [Groq LLM], validate_params(),
-                              recommend() [top-5 via model], fallback_recommend()
+                              recommend() [model picks cluster → top-5], fallback_recommend(),
+                              phrase_response() [LLM restates the model's picks]
 tests/
 └── test_smoke.py           — 8 smoke tests (all must pass on every commit)
 notebooks/
