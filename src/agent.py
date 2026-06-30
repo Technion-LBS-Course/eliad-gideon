@@ -256,3 +256,50 @@ def fallback_recommend(
         "cheapest": pool.sort_values("price_nis", ascending=True).head(1).reset_index(drop=True),
         "closest": pool.sort_values("distance_km", ascending=True).head(1).reset_index(drop=True),
     }
+
+
+def phrase_response(user_text: str, params: dict, df_top: pd.DataFrame, api_key: str) -> str | None:
+    """Step 4 (optional): the LLM phrases the MODEL's output in natural language.
+
+    The LLM is handed the EXACT venues the model already chose, with their real numbers, and may
+    only restate them — it cannot invent, add, drop, or change a venue, price, or rating. This is
+    the 'output translation' half of the loop: the number stays the model's, the wording is the
+    LLM's. Returns the text, or None on failure (the caller still shows the venue table)."""
+    if df_top is None or df_top.empty:
+        return None
+
+    picks = "\n".join(
+        f"{i}. {row['name']} — ⭐{row['rating']:.1f}, ₪{row['price_nis']:.0f}"
+        for i, (_, row) in enumerate(df_top.iterrows(), start=1)
+    )
+    target = df_top.attrs.get("model_target_label", "")
+
+    system = (
+        "You are the response layer of a shawarma recommender. The ML model has ALREADY chosen "
+        "the venues below, with their real numbers. Write a short, warm reply (2-4 sentences) IN "
+        "THE SAME LANGUAGE the user wrote in. Hard rules: use ONLY the venues, prices and ratings "
+        "listed below — never invent, add, drop, or change a venue or a number, and never output "
+        "more venues than given. You may mention the model's cluster."
+    )
+    user = (
+        f'The user wrote:\n"""\n{user_text.strip()}\n"""\n\n'
+        f"The model placed this profile in cluster: {target}.\n"
+        f"The model's selected venues (use these exactly, in this order):\n{picks}\n\n"
+        "Write the reply now — no preamble, no JSON, just the message to the user."
+    )
+    try:
+        from groq import Groq
+
+        client = Groq(api_key=api_key)
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            temperature=0.3,  # a little warmth in wording; the facts are fixed by the model
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        text = resp.choices[0].message.content.strip()
+        return text or None
+    except Exception:
+        return None

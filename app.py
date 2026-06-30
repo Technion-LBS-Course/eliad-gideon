@@ -4,7 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 
-from src.agent import extract_params, fallback_recommend, recommend
+from src.agent import extract_params, fallback_recommend, phrase_response, recommend
 from src.data import load_raw, clean
 from src.model import (
     assign_cluster_labels,
@@ -911,6 +911,15 @@ with tab6:
                     f"**«{target_label}»** ({df_top.attrs.get('model_cluster_n', 0)} venues in it). "
                     "The LLM only extracted the 4 parameters above — the model chose the group below."
                 )
+
+            # Step 4 — the LLM phrases the model's picks (it may only restate them, not invent).
+            if api_key:
+                with st.spinner("Writing your recommendation…"):
+                    reply = phrase_response(user_text, params, df_top, api_key)
+                if reply:
+                    with st.chat_message("assistant"):
+                        st.markdown(reply)
+
             st.markdown(f"#### 🏆 Top {len(df_top)} venues for you")
             disp = ["name", "city", "rating", "weighted_rating", "price_nis", "cluster_label", "score"]
             if "google_maps_url" in df_top.columns:
