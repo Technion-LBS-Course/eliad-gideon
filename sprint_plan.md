@@ -19,21 +19,30 @@
 - [x] Update CLAUDE.md with actual data findings
 
 ## M3 · Clustering Model ✅ (completed — 2026-06-07)
-- [x] Normalize features with `StandardScaler` on `[price_nis, rating, reviews_count]`
-- [x] Train K-Means with k auto-tuned ∈ {3…8} via Silhouette sweep (best k=4)
-- [x] Train DBSCAN (eps=0.5, min_samples=5) with KNN fallback for test evaluation
-- [x] Train Agglomerative Clustering (ward linkage, same k sweep)
-- [x] 70/30 train/test split — report Silhouette Score on both splits
-- [x] KMeans test silhouette = 0.373 · DBSCAN = 0.708 · Agglomerative = ~0.37
+- [x] Normalize features with `StandardScaler` on `[price_nis, weighted_rating]`
+- [x] Train K-Means with k=9 fixed (one cluster per target class)
+- [x] Train DBSCAN (eps auto-tuned, min_samples=5) with KNN fallback for test evaluation
+- [x] Train Agglomerative Clustering (ward linkage, k=9)
+- [x] 80/20 train/test split — report Silhouette Score on both splits
+- [x] KMeans test silhouette ~0.37 · DBSCAN ~0.71 · Agglomerative ~0.37
+- [x] 9-class confusion matrix via Hungarian cluster→class matching
 - [x] Implement persona-weighted ranking score (student / quality personas)
-- [x] Add 🤖 Recommend tab: city selector → Train & Compare → elbow chart + KPI table → ranked venues
+- [x] Add 🔮 Predicted tab: Train & Compare → KPI table → confusion matrix → per-cluster deep-dive
 - [x] Save/load model via `data/kmeans_model.pkl`
 - [x] Write `tests/test_smoke.py` (8 tests, all passing)
 - [x] Merge `Eliad` branch into `main`
 
-## M4 · Evaluation & Presentation 🔲 (weeks 8–9)
+## M4 · Agent Layer (model → agent, input layer) ✅ (completed — 2026-06-30)
+- [x] Build `src/agent.py` wrapping the M3 model (the LLM translates; the model decides)
+- [x] System + user prompts; Groq/Llama (`llama-3.3-70b-versatile`, `temperature=0`, OpenAI-compatible)
+- [x] LLM classifies free text into 4 params: city · budget · quality · user_type (strict JSON)
+- [x] Output validation + Fallback (ask for city → best / cheapest / closest)
+- [x] `recommend()` runs the model's `predict()` and returns the top-5 venues
+- [x] 🤖 Agent tab with free-text input; key in `st.secrets` (`.streamlit/secrets.toml`, git-ignored)
+- [x] Remove 🗺️ Haifa tab; drop unused `folium` / `streamlit-folium` deps
+
+## M5 · Evaluation & Presentation 🔲 (weeks 8–9)
 - [ ] Final Silhouette Score report
 - [ ] Manual persona match evaluation (50 test cases)
 - [ ] Response time benchmark (< 3 sec GPS → list)
-- [ ] Finalize Streamlit UI with all tabs
 - [ ] Presentation slides + live demo

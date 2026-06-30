@@ -59,15 +59,12 @@ def build_system_prompt(cities: list[str]) -> str:
     )
 
 
-def build_user_prompt(profile: dict) -> str:
-    """The user prompt — changes every call. The free-text profile the user supplied."""
+def build_user_prompt(user_text: str) -> str:
+    """The user prompt — changes every call. The user's free-text description of themselves."""
     return (
-        "User profile:\n"
-        f"- Age: {profile.get('age', 'unknown')}\n"
-        f"- Life status: {profile.get('life_status', 'unknown')}\n"
-        f"- Maximum budget (NIS): {profile.get('max_budget', 'not stated')}\n"
-        f"- Quality preference: {profile.get('quality_pref', 'not stated')}\n"
-        f"- Location (city / from device GPS): {profile.get('location', 'unknown')}\n\n"
+        "Here is the user describing themselves and what they want, in their own words "
+        "(Hebrew or English):\n"
+        f'"""\n{user_text.strip()}\n"""\n\n'
         "Classify this into the four parameters as instructed. Return JSON only."
     )
 
@@ -120,9 +117,9 @@ def validate_params(raw: dict | None, valid_cities: list[str]) -> dict | None:
     }
 
 
-def extract_params(profile: dict, api_key: str, valid_cities: list[str]) -> dict | None:
-    """Steps 1-2: call the LLM to classify the profile into the 4 params, then validate.
-    Returns validated params, or None on any failure (network, bad JSON, out of range)."""
+def extract_params(user_text: str, api_key: str, valid_cities: list[str]) -> dict | None:
+    """Steps 1-2: call the LLM to classify the free-text profile into the 4 params, then
+    validate. Returns validated params, or None on any failure (network, bad JSON, range)."""
     try:
         from groq import Groq
 
@@ -132,7 +129,7 @@ def extract_params(profile: dict, api_key: str, valid_cities: list[str]) -> dict
             temperature=0,  # low temperature → reliable JSON
             messages=[
                 {"role": "system", "content": build_system_prompt(valid_cities)},
-                {"role": "user", "content": build_user_prompt(profile)},
+                {"role": "user", "content": build_user_prompt(user_text)},
             ],
         )
         raw = _parse_json(resp.choices[0].message.content)

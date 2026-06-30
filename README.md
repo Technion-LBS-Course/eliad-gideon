@@ -13,6 +13,15 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+**Optional — enable the M4 agent (free-text recommendations):** add a free [Groq](https://console.groq.com) key so the 🤖 Agent tab can run the LLM. Copy the template and drop your key in:
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# then edit .streamlit/secrets.toml → GROQ_API_KEY = "gsk_..."
+```
+
+`.streamlit/secrets.toml` is git-ignored and must never be committed. Without a key the Agent tab still works via the city fallback (best / cheapest / closest).
+
 ---
 
 ## Dashboard Screenshot
@@ -79,25 +88,35 @@ Israel's shawarma market has 12,000+ venues with prices ranging ₪37–₪58 pe
 
 | Algorithm | Paradigm | Hyperparameters | Train Silhouette | Test Silhouette | Meets KPI ≥ 0.45 |
 |-----------|----------|----------------|-----------------|----------------|-----------------|
-| **KMeans** | Partitional | k=4 (auto-tuned ∈ {3…8}) | 0.377 | 0.373 | ❌ |
-| **DBSCAN** | Density-based | eps=0.5, min_samples=5 | 0.729 | 0.708 | ✅ |
-| **Agglomerative** | Hierarchical | k=4 (ward linkage) | ~0.37 | ~0.37 | ❌ |
+| **KMeans** | Partitional | k=9 (fixed — one per target class) | ~0.37 | ~0.37 | ❌ |
+| **DBSCAN** | Density-based | eps auto-tuned, min_samples=5 | ~0.73 | ~0.71 | ✅ |
+| **Agglomerative** | Hierarchical | k=9 (ward linkage) | ~0.37 | ~0.37 | ❌ |
 
-**Selected model: KMeans (k=4)** — only algorithm with native `predict()` for new venues. DBSCAN achieves a higher silhouette but cannot generalize out-of-sample without a KNN fallback. The low KMeans silhouette reflects the dataset's narrow ₪5 IQR price band, which limits cluster separability.
+**Selected model: KMeans (k=9)** — only algorithm with native `predict()` for new venues. DBSCAN achieves a higher silhouette but cannot generalize out-of-sample without a KNN fallback (and its score is inflated by being computed on non-noise points only). The low KMeans silhouette reflects the dataset's narrow ₪5 IQR price band, which limits cluster separability. k is fixed at 9 so each cluster maps to one target class — {good / medium / bad score} × {high / fair / low price} — enabling a confusion-matrix accuracy readout via Hungarian matching.
 
 ### Train / Test Split
-- **Split:** 70% train / 30% test, `random_state=42`
+- **Split:** 80% train / 20% test, `random_state=42`
 - **Eligible rows:** venues with non-null `price_nis` + `rating` (~12k venues)
-- **Features:** `[price_nis, rating, reviews_count]` — StandardScaler-normalized
-- **KPI:** Silhouette Score ≥ 0.45 on test split
+- **Features:** `[price_nis, weighted_rating]` — StandardScaler-normalized. `weighted_rating` is a Bayesian confidence-smoothed rating (low-review venues are pulled toward the global mean).
+- **KPI:** Silhouette Score ≥ 0.45 on test split + 9-class confusion-matrix accuracy
 
 ### Running the ML pipeline in Streamlit
-1. Open the **🤖 Recommend** tab
-2. Select your city, persona, and max distance
-3. Click **🔬 Train & Compare Models** — see elbow chart and train/test KPI table
-4. Click **🥙 Find My Shawarma** — ranked venue list
+1. Open the **🔮 Predicted** tab
+2. Click **🔬 Train & Compare Models** — see the train/test KPI table, confusion matrix, and per-cluster deep-dive
+3. The trained model is persisted at `data/kmeans_model.pkl` and auto-loaded on next run
 
-Trained model is persisted at `data/kmeans_model.pkl` and auto-loaded on next run.
+---
+
+## M4 — Agent Layer (free-text → model)
+
+The agent **wraps** the M3 model — it translates language, the model produces the numbers. Loop:
+
+1. **Free text in** — in the **🤖 Agent** tab you describe yourself in your own words (Hebrew or English), e.g. *"אני סטודנט בן 23 בחיפה, תקציב עד 50 ש"ח, רוצה את האיכות הכי גבוהה"*.
+2. **LLM extracts 4 parameters** — a Groq/Llama model (`llama-3.3-70b-versatile`, `temperature=0`) returns strict JSON: `city` (מיקום) · `max_budget_nis` (סכום) · `quality_preference` (איכות) · `user_type` (סוג משתמש).
+3. **Your model ranks** — the saved KMeans model clusters the matching venues and ranks them by persona-weighted score → **top 5**.
+4. **Fallback** — if the LLM output is invalid (bad JSON / out of range / unknown city), the agent asks only for the city and returns **best / cheapest / closest**.
+
+Implemented in `src/agent.py`. Groq is **OpenAI-compatible** (`chat.completions.create`). The key is read from `st.secrets["GROQ_API_KEY"]` (see *How to Run*).
 
 ---
 
@@ -105,40 +124,48 @@ Trained model is persisted at `data/kmeans_model.pkl` and auto-loaded on next ru
 
 | Component | Definition |
 |-----------|-----------|
-| **Input X** | `[price_nis, rating, reviews_count]` — StandardScaler-normalized venue features |
-| **Output y** | Cluster label per venue + persona-weighted ranking score |
-| **Algorithm** | K-Means · k tuned via Elbow + Silhouette on k ∈ {3…8} |
+| **Input X** | `[price_nis, weighted_rating]` — StandardScaler-normalized venue features |
+| **Output y** | 9-class label: {good / medium / bad score} × {high / fair / low price}; plus persona-weighted ranking score |
+| **Algorithm** | K-Means · k = 9 (fixed — one cluster per target class) |
 | **Loss / Objective** | Minimize intra-cluster variance; maximize inter-cluster separation |
-| **Train / Test** | 70% / 30% random split, `random_state=42` |
+| **Train / Test** | 80% / 20% random split, `random_state=42` |
 | **Distance** | Haversine-computed at query time; used for filtering + scoring, not clustering |
-| **Baseline** | Naïve sort by distance only — current Google Maps default |
+| **Baseline** | Random cluster assignment (same k = 9), computed per run |
 
 ---
 
 ## File Structure
 
 ```
-app.py                      — Streamlit entry point (5 tabs; UI shell only, no logic)
+app.py                      — Streamlit entry point (6 tabs; UI shell only, no logic)
 requirements.txt            — Pinned dependencies
 README.md                   — This file
 sprint_plan.md              — Milestone tracker
 CLAUDE.md                   — Coding conventions and project context
+.streamlit/
+├── secrets.toml            — GROQ_API_KEY (git-ignored; never commit)
+└── secrets.toml.example    — Template (committed)
 data/
 ├── dataset.csv             — 12,270 clean venues (committed)
 └── kmeans_model.pkl        — Trained KMeans model (auto-loaded by app)
 src/
 ├── __init__.py
-├── data.py                 — load_raw(), clean() [adds price_nis], build_features()
+├── data.py                 — load_raw(), clean() [adds price_nis, weighted_rating], build_features()
 ├── eda.py                  — EDA chart functions
-└── model.py                — split_data(), find_best_k(), train_kmeans(),
-                              train_dbscan(), train_agglomerative(),
-                              compare_algorithms(), save_model(), load_model(), predict()
+├── model.py                — split_data(), find_best_k(), train_kmeans(),
+│                             train_dbscan(), train_agglomerative(), compare_algorithms(),
+│                             compute_confusion_matrix(), save_model(), load_model(), predict()
+└── agent.py                — M4 agent: build_system_prompt(), build_user_prompt(),
+                              extract_params() [Groq LLM], validate_params(),
+                              recommend() [top-5 via model], fallback_recommend()
 tests/
 └── test_smoke.py           — 8 smoke tests (all must pass on every commit)
 notebooks/
 └── 01_eda.ipynb            — Exploratory analysis
 .gitignore
 ```
+
+**Tabs:** 🎯 Problem & Personas · 📚 Literature & Market · 📊 EDA · 🏆 KPI & Model · 🔮 Predicted · 🤖 Agent
 
 ---
 
