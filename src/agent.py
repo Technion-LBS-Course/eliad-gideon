@@ -4,7 +4,9 @@ the M3 model needs, runs YOUR model, and returns ranked venues.
 The loop (the number ALWAYS comes from the model, never the LLM):
   1. user describes themselves in free text / a profile form
   2. the LLM classifies that into 4 parameters (city, budget, quality, user_type) as JSON
-  3. the saved KMeans model assigns clusters and ranks venues by persona-weighted score
+  3. the saved KMeans model predicts which cluster the user's ideal profile falls in, and we
+     return real venues the model placed in that same cluster (the model — not the LLM and not
+     a hand-coded formula — selects the group)
   4. we present the top-5 venues; on any invalid LLM output we fall back (ask for a city,
      return best / cheapest / closest)
 """
@@ -15,7 +17,7 @@ import re
 
 import pandas as pd
 
-from src.model import FEATURE_COLS, PERSONA_WEIGHTS, _haversine
+from src.model import FEATURE_COLS, PERSONA_WEIGHTS, _haversine, assign_cluster_labels
 
 # Groq is OpenAI-compatible (NOT Anthropic) — use chat.completions.create.
 MODEL_NAME = "llama-3.3-70b-versatile"
@@ -23,8 +25,14 @@ MODEL_NAME = "llama-3.3-70b-versatile"
 VALID_USER_TYPES = ("student", "quality")
 VALID_QUALITY = ("low", "medium", "high")
 
-# Quality preference (איכות) → minimum confidence-weighted rating the venue must clear.
+# Quality preference (איכות) → minimum raw rating the venue must clear (hard floor).
 QUALITY_MIN_RATING = {"low": 0.0, "medium": 4.0, "high": 4.5}
+
+# Quality preference → which quantile of the *actual* weighted_rating distribution to use as
+# the rating coordinate of the user's "ideal venue". Using a real quantile (instead of a fixed
+# 5.0) keeps the ideal point inside the populated region of feature space, so the model lands
+# on a cluster that actually contains venues.
+QUALITY_RATING_QUANTILE = {"low": 0.25, "medium": 0.55, "high": 0.90}
 
 # Budget inferred from life status (סכום) when the user gives no explicit ceiling.
 BUDGET_BY_STATUS = {"student": 50, "working": 65, "retired": 60, "other": 80}
@@ -157,34 +165,72 @@ def recommend(
     user_lng: float | None = None,
     top_n: int = 5,
 ) -> pd.DataFrame:
-    """Step 3: filter by the extracted params, assign clusters with YOUR model,
-    and rank by persona-weighted score. Returns the top-N optimal venues."""
-    df = df.dropna(subset=["price_nis", "rating", "weighted_rating"]).copy()
+    """Step 3: YOUR KMeans model selects the venues.
 
+    The user's hard constraints (city, budget) filter the candidate pool. Then we build the
+    user's *ideal venue* as a point in the model's feature space and call the model's
+    predict() on it — the cluster the model assigns to that ideal is the target. We return
+    real venues the model placed in the same cluster. The persona weights only order venues
+    *within* the model-chosen cluster; they never override which cluster the model picked.
+    The returned frame carries .attrs['model_target_label'] / ['model_target_cluster']."""
+    df_full = df.dropna(subset=["price_nis", "rating", "weighted_rating"]).copy()
+
+    df = df_full
     if params.get("city"):
         df = df[df["city"] == params["city"]]
-
     df = df[df["price_nis"] <= params["max_budget_nis"]]
-    # Filter on raw rating: weighted_rating collapses to the global mean for the ~95% of
-    # venues that lack a review count, so it can't discriminate on quality. rating does.
+    # Hard quality floor on raw rating (weighted_rating collapses to the global mean for the
+    # ~95% of venues lacking a review count, so it can't discriminate quality; rating can).
     min_rating = QUALITY_MIN_RATING.get(params["quality_preference"], 0.0)
-    df = df[df["rating"] >= min_rating]
+    df = df[df["rating"] >= min_rating].copy()
     if df.empty:
         return df
 
     df = _with_distance(df, user_lat, user_lng)
 
-    # The model assigns each surviving venue to a cluster (native predict()).
-    X = model_result["scaler"].transform(df[FEATURE_COLS].fillna(0))
-    df["cluster"] = model_result["model"].predict(X)
+    # The model assigns every candidate venue to a cluster (native predict()).
+    scaler, model = model_result["scaler"], model_result["model"]
+    df["cluster"] = model.predict(scaler.transform(df[FEATURE_COLS].fillna(0)))
 
+    # Build the user's ideal venue in FEATURE_COLS order [price_nis, weighted_rating] and ask
+    # the MODEL which cluster it belongs to. Both coordinates are real quantiles of the
+    # candidate pool, so the ideal always lands in populated feature space (never an empty
+    # cluster). Students anchor to the cheap end; others to the median price (price and quality
+    # are uncorrelated here, r≈-0.06, so chasing a higher price buys nothing). This step is what
+    # makes the model — not a formula — decide the group.
+    price_q = 0.15 if params["user_type"] == "student" else 0.50
+    ideal_price = float(df["price_nis"].quantile(price_q))
+    rating_q = QUALITY_RATING_QUANTILE.get(params["quality_preference"], 0.55)
+    ideal_rating = float(df["weighted_rating"].quantile(rating_q))
+    ideal = pd.DataFrame([[ideal_price, ideal_rating]], columns=FEATURE_COLS)
+    target_cluster = int(model.predict(scaler.transform(ideal))[0])
+
+    # Labels computed on the full dataset so price tiers are stable, not relative to the slice.
+    labels = assign_cluster_labels(model_result, df_full)
+    df["cluster_label"] = df["cluster"].map(labels)
+
+    # Persona-weighted ordering — used ONLY to rank within the model's chosen cluster.
     w = PERSONA_WEIGHTS.get(params["user_type"], PERSONA_WEIGHTS["student"])
     df["score"] = (
         w["rating"] * df["rating"]
         + w["price_nis"] * df["price_nis"] / 10
         + w["distance_km"] * df["distance_km"]
     )
-    return df.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
+
+    in_cluster = df[df["cluster"] == target_cluster].sort_values("score", ascending=False)
+    # If the model's cluster has fewer than top_n venues, backfill with the next-best
+    # candidates (still real venues, still ordered by the persona score).
+    if len(in_cluster) < top_n:
+        rest = df[df["cluster"] != target_cluster].sort_values("score", ascending=False)
+        result = pd.concat([in_cluster, rest])
+    else:
+        result = in_cluster
+
+    result = result.head(top_n).reset_index(drop=True)
+    result.attrs["model_target_cluster"] = target_cluster
+    result.attrs["model_target_label"] = labels.get(target_cluster, str(target_cluster))
+    result.attrs["model_cluster_n"] = int((df["cluster"] == target_cluster).sum())
+    return result
 
 
 def fallback_recommend(

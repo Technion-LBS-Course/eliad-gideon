@@ -904,8 +904,15 @@ with tab6:
 
         st.divider()
         if params is not None and not df_top.empty:
+            target_label = df_top.attrs.get("model_target_label")
+            if target_label:
+                st.success(
+                    f"🧠 **Your KMeans model** predicted the cluster for this profile → "
+                    f"**«{target_label}»** ({df_top.attrs.get('model_cluster_n', 0)} venues in it). "
+                    "The LLM only extracted the 4 parameters above — the model chose the group below."
+                )
             st.markdown(f"#### 🏆 Top {len(df_top)} venues for you")
-            disp = ["name", "city", "rating", "weighted_rating", "price_nis", "score"]
+            disp = ["name", "city", "rating", "weighted_rating", "price_nis", "cluster_label", "score"]
             if "google_maps_url" in df_top.columns:
                 disp.append("google_maps_url")
             out = df_top[disp].copy()
@@ -916,7 +923,8 @@ with tab6:
                 out.rename(columns={
                     "name": "Venue", "city": "City", "rating": "Rating",
                     "weighted_rating": "Conf. ⭐", "price_nis": "Price (NIS)",
-                    "score": "Score", "google_maps_url": "Maps",
+                    "cluster_label": "Model cluster", "score": "Score",
+                    "google_maps_url": "Maps",
                 }),
                 use_container_width=True,
                 column_config={
