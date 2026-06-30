@@ -1,4 +1,6 @@
 pandas==2.2.*
+numpy==2.4.*
+scipy==1.17.*
 streamlit==1.36.*
 plotly==5.22.*
 scikit-learn==1.5.*
