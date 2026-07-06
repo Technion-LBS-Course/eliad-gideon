@@ -28,14 +28,14 @@ VALID_QUALITY = ("low", "medium", "high")
 # Quality preference (איכות) → minimum raw rating the venue must clear (hard floor).
 QUALITY_MIN_RATING = {"low": 0.0, "medium": 4.0, "high": 4.5}
 
-# Quality preference → which quantile of the *actual* weighted_rating distribution to use as
+# Quality preference → which quantile of the *actual* rating distribution to use as
 # the rating coordinate of the user's "ideal venue". Using a real quantile (instead of a fixed
 # 5.0) keeps the ideal point inside the populated region of feature space, so the model lands
 # on a cluster that actually contains venues.
 QUALITY_RATING_QUANTILE = {"low": 0.25, "medium": 0.55, "high": 0.90}
 
 # Budget inferred from life status (סכום) when the user gives no explicit ceiling.
-BUDGET_BY_STATUS = {"student": 50, "working": 65, "retired": 60, "other": 80}
+BUDGET_BY_STATUS = {"student": 58, "working": 68, "retired": 62, "other": 78}
 
 
 def build_system_prompt(cities: list[str]) -> str:
@@ -54,7 +54,7 @@ def build_system_prompt(cities: list[str]) -> str:
         f"match from this list: [{city_list}]. Map a neighbourhood or landmark to its "
         "city. If it cannot be determined, use null.\n"
         '  "max_budget_nis": integer — the most the user will pay for one shawarma (סכום). '
-        "If not stated, infer from life status: student≈50, working≈65, retired≈60, else 80.\n"
+        "If not stated, infer from life status: student≈58, working≈68, retired≈62, else 78.\n"
         '  "quality_preference": one of "low", "medium", "high" — how much the user '
         "prioritises rating/quality (איכות).\n"
         '  "user_type": one of "student", "quality" — the persona (סוג משתמש). Map '
@@ -192,7 +192,7 @@ def recommend(
     scaler, model = model_result["scaler"], model_result["model"]
     df["cluster"] = model.predict(scaler.transform(df[FEATURE_COLS].fillna(0)))
 
-    # Build the user's ideal venue in FEATURE_COLS order [price_nis, weighted_rating] and ask
+    # Build the user's ideal venue in FEATURE_COLS order [price_nis, rating] and ask
     # the MODEL which cluster it belongs to. Both coordinates are real quantiles of the
     # candidate pool, so the ideal always lands in populated feature space (never an empty
     # cluster). Students anchor to the cheap end; others to the median price (price and quality
@@ -201,7 +201,7 @@ def recommend(
     price_q = 0.15 if params["user_type"] == "student" else 0.50
     ideal_price = float(df["price_nis"].quantile(price_q))
     rating_q = QUALITY_RATING_QUANTILE.get(params["quality_preference"], 0.55)
-    ideal_rating = float(df["weighted_rating"].quantile(rating_q))
+    ideal_rating = float(df["rating"].quantile(rating_q))
     ideal = pd.DataFrame([[ideal_price, ideal_rating]], columns=FEATURE_COLS)
     target_cluster = int(model.predict(scaler.transform(ideal))[0])
 
@@ -252,7 +252,7 @@ def fallback_recommend(
     pool = _with_distance(pool, lat, lng)
 
     return {
-        "best": pool.sort_values("weighted_rating", ascending=False).head(1).reset_index(drop=True),
+        "best": pool.sort_values("rating", ascending=False).head(1).reset_index(drop=True),
         "cheapest": pool.sort_values("price_nis", ascending=True).head(1).reset_index(drop=True),
         "closest": pool.sort_values("distance_km", ascending=True).head(1).reset_index(drop=True),
     }

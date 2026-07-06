@@ -413,8 +413,8 @@ with tab4:
     st.markdown("""
 | Component | Definition |
 |-----------|-----------|
-| **Input X** | `[price_NIS, weighted_rating]` — Bayesian-smoothed rating + price, StandardScaler-normalized |
-| **Output y** | 9-class label: {good / medium / bad score} × {high / fair / low price} |
+| **Input X** | `[price_NIS, rating]` — raw rating + price, StandardScaler-normalized |
+| **Output y** | 9-class label: {good / average / bad} × {expensive / reasonable / affordable} |
 | **Algorithm** | K-Means · k = 9 (fixed — one cluster per target class) |
 | **Loss / Objective** | Minimize intra-cluster variance; maximize inter-cluster separation |
 | **Train / Test** | 80% / 20% random split (`random_state=42`) |
@@ -474,8 +474,8 @@ with tab5:
     st.markdown("#### Why These 3 Algorithms?")
     st.caption(
         "Three fundamentally different clustering paradigms were chosen to compare how well each "
-        "separates venues along the price–weighted_rating axis. "
-        "Features: `[price_nis, weighted_rating]` — StandardScaler-normalized."
+        "separates venues along the price–rating axis. "
+        "Features: `[price_nis, rating]` — StandardScaler-normalized."
     )
 
     a1, a2, a3 = st.columns(3)
@@ -583,38 +583,30 @@ DBSCAN's higher score (0.71) is partly because it only evaluates non-noise point
         col_truth, col_pred = st.columns(2)
         from src.model import FEATURE_COLS as _FC
 
-        df_sample = df_all.dropna(subset=["price_nis", "weighted_rating"]).sample(
-            min(2000, len(df_all)), random_state=42
-        ).copy()
+        df_valid = df_all.dropna(subset=["price_nis", "rating"])
+        df_sample = df_valid.sample(min(2000, len(df_valid)), random_state=42).copy()
         # True classes on sample
-        if "df_train" in st.session_state:
-            df_tr_s = st.session_state["df_train"]
-            p33_s = float(df_tr_s["price_nis"].quantile(0.33))
-            p67_s = float(df_tr_s["price_nis"].quantile(0.67))
-        else:
-            p33_s = float(df_all["price_nis"].quantile(0.33))
-            p67_s = float(df_all["price_nis"].quantile(0.67))
         score_s = np.select(
-            [df_sample["weighted_rating"] >= 4.5, df_sample["weighted_rating"] >= 3.0],
-            ["good score", "medium score"], default="bad score",
+            [df_sample["rating"] >= 4.5, df_sample["rating"] >= 4.0],
+            ["good", "average"], default="bad",
         )
         price_s = np.select(
-            [df_sample["price_nis"] >= p67_s, df_sample["price_nis"] >= p33_s],
-            ["high price", "fair price"], default="low price",
+            [df_sample["price_nis"] > 60, df_sample["price_nis"] >= 54],
+            ["expensive", "reasonable"], default="affordable",
         )
         df_sample["target_class"] = score_s + " - " + price_s
 
         with col_truth:
             fig_truth = px.scatter(
-                df_sample, x="price_nis", y="weighted_rating",
+                df_sample, x="price_nis", y="rating",
                 color="target_class",
                 opacity=0.45,
-                labels={"price_nis": "Price (NIS)", "weighted_rating": "Conf. Rating", "target_class": "True Class"},
+                labels={"price_nis": "Price (NIS)", "rating": "Rating", "target_class": "True Class"},
                 title="Ground truth — 9 target classes",
                 height=380,
             )
             fig_truth.add_hline(y=4.5, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="4.5")
-            fig_truth.add_hline(y=3.0, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="3.0")
+            fig_truth.add_hline(y=4.0, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="4.0")
             fig_truth.update_traces(marker_size=4)
             fig_truth.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.55, font_size=9))
             st.plotly_chart(fig_truth, use_container_width=True)
@@ -625,15 +617,15 @@ DBSCAN's higher score (0.71) is partly because it only evaluates non-noise point
         df_sample["cluster_label"] = df_sample["cluster_id"].map(cluster_labels)
         with col_pred:
             fig_pred = px.scatter(
-                df_sample, x="price_nis", y="weighted_rating",
+                df_sample, x="price_nis", y="rating",
                 color="cluster_label",
                 opacity=0.45,
-                labels={"price_nis": "Price (NIS)", "weighted_rating": "Conf. Rating", "cluster_label": "KMeans Cluster"},
+                labels={"price_nis": "Price (NIS)", "rating": "Rating", "cluster_label": "KMeans Cluster"},
                 title="KMeans prediction — 9 clusters",
                 height=380,
             )
             fig_pred.add_hline(y=4.5, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="4.5")
-            fig_pred.add_hline(y=3.0, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="3.0")
+            fig_pred.add_hline(y=4.0, line_dash="dot", line_color="rgba(0,0,0,0.3)", annotation_text="4.0")
             fig_pred.update_traces(marker_size=4)
             fig_pred.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.55, font_size=9))
             st.plotly_chart(fig_pred, use_container_width=True)
@@ -701,8 +693,8 @@ DBSCAN's higher score (0.71) is partly because it only evaluates non-noise point
         st.divider()
         st.markdown("#### Cluster Analysis — What Defines Each Cluster?")
         st.caption(
-            "Rating thresholds: **Good** ≥ 4.5 · **Medium** 3.0–4.5 · **Bad** < 3.0 (confidence-adjusted). "
-            "Price thresholds: **High** > 67th pct · **Fair** 33–67th pct · **Low** < 33rd pct."
+            "Rating thresholds: **Good** ≥ 4.5 · **Average** 4.0–4.4 · **Bad** < 4.0 (raw rating). "
+            "Price thresholds: **Expensive** > ₪60 · **Reasonable** ₪54–60 · **Affordable** < ₪54."
         )
 
         from src.model import FEATURE_COLS as _FC3
@@ -866,7 +858,7 @@ with tab6:
     user_text = st.text_area(
         "Tell me about you and what you're after — age, life stage, budget, how much quality "
         "matters, and where you are. Free text, Hebrew or English.",
-        value='אני סטודנט בן 23 בחיפה, התקציב שלי עד 50 ש"ח, ואני מחפש את האיכות הכי גבוהה שאפשר.',
+        value='אני סטודנט בן 23 בחיפה, התקציב שלי עד 60 ש"ח, ואני מחפש את האיכות הכי גבוהה שאפשר.',
         height=130,
         help="The LLM extracts the 4 parameters (city · budget · quality · user type) from this text.",
     )
@@ -943,6 +935,26 @@ with tab6:
                     "Maps": st.column_config.LinkColumn("Maps", display_text="Open ↗"),
                 },
             )
+
+            if {"lat", "lng"}.issubset(df_top.columns):
+                st.markdown("##### 📍 Map")
+                fig_top_map = px.scatter_mapbox(
+                    df_top,
+                    lat="lat",
+                    lon="lng",
+                    hover_name="name",
+                    hover_data={"price_nis": ":.0f", "rating": ":.1f", "lat": False, "lng": False},
+                    color="cluster_label" if "cluster_label" in df_top.columns else None,
+                    zoom=11,
+                    height=420,
+                )
+                fig_top_map.update_traces(marker=dict(size=14))
+                fig_top_map.update_layout(
+                    mapbox_style="open-street-map",
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.15),
+                )
+                st.plotly_chart(fig_top_map, use_container_width=True)
         else:
             # Fallback path (point 3): ask only for the city, return best / cheapest / closest.
             st.markdown("#### Fallback — tell me your city")

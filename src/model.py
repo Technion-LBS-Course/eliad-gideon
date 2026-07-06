@@ -14,7 +14,7 @@ from sklearn.metrics import confusion_matrix as _sk_cm
 from sklearn.preprocessing import StandardScaler
 from scipy.optimize import linear_sum_assignment
 
-FEATURE_COLS = ["price_nis", "weighted_rating"]
+FEATURE_COLS = ["price_nis", "rating"]
 MODEL_PATH = Path(__file__).parent.parent / "data" / "kmeans_model.pkl"
 
 PERSONA_WEIGHTS = {
@@ -25,15 +25,15 @@ PERSONA_WEIGHTS = {
 N_CLUSTERS = 9  # fixed — one cluster per target class
 
 TARGET_CLASSES = [
-    "good score - high price",
-    "good score - fair price",
-    "good score - low price",
-    "medium score - high price",
-    "medium score - fair price",
-    "medium score - low price",
-    "bad score - high price",
-    "bad score - fair price",
-    "bad score - low price",
+    "good - expensive",
+    "good - reasonable",
+    "good - affordable",
+    "average - expensive",
+    "average - reasonable",
+    "average - affordable",
+    "bad - expensive",
+    "bad - reasonable",
+    "bad - affordable",
 ]
 
 
@@ -192,21 +192,22 @@ def compare_algorithms(df: pd.DataFrame) -> tuple[dict, dict, dict, pd.DataFrame
 
 def _add_target_class(df_train: pd.DataFrame, df_test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Add 9-class target_class column to both splits.
-    Price thresholds (33rd/67th pct) computed on train set only to prevent leakage."""
-    p33 = float(df_train["price_nis"].quantile(0.33))
-    p67 = float(df_train["price_nis"].quantile(0.67))
+
+    Rating: good >= 4.5 stars, average 4.0-4.4, bad < 4.0.
+    Price: fixed NIS thresholds — expensive > 60, reasonable 54-60, affordable < 54.
+    """
 
     def _label(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         score = np.select(
-            [df["weighted_rating"] >= 4.5, df["weighted_rating"] >= 3.0],
-            ["good score", "medium score"],
-            default="bad score",
+            [df["rating"] >= 4.5, df["rating"] >= 4.0],
+            ["good", "average"],
+            default="bad",
         )
         price = np.select(
-            [df["price_nis"] >= p67, df["price_nis"] >= p33],
-            ["high price", "fair price"],
-            default="low price",
+            [df["price_nis"] > 60, df["price_nis"] >= 54],
+            ["expensive", "reasonable"],
+            default="affordable",
         )
         df["target_class"] = score + " - " + price
         return df
@@ -223,7 +224,9 @@ def compute_confusion_matrix(result: dict, df_train: pd.DataFrame, df_test: pd.D
     train_cluster_ids = result["model"].predict(X_tr)
     test_cluster_ids  = result["model"].predict(X_te)
 
-    present = [c for c in TARGET_CLASSES if c in df_tr["target_class"].values]
+    # Always use the full fixed 9-class list so the confusion matrix is always 9x9,
+    # even if a class happens to have zero support in this train/test split.
+    present = TARGET_CLASSES
     cls_idx = {c: i for i, c in enumerate(present)}
 
     # Cost matrix: negative overlap between cluster k and class c on TRAIN set
@@ -251,38 +254,36 @@ def compute_confusion_matrix(result: dict, df_train: pd.DataFrame, df_test: pd.D
         "classes": present,
         "accuracy": accuracy,
         "cluster_to_class": cluster_to_class,
-        "price_p33": float(df_train["price_nis"].quantile(0.33)),
-        "price_p67": float(df_train["price_nis"].quantile(0.67)),
+        "price_affordable_cutoff": 54.0,
+        "price_expensive_cutoff": 60.0,
     }
 
 def assign_cluster_labels(result: dict, df: pd.DataFrame) -> dict[int, str]:
-    """Map each cluster ID to a semantic label based on centroid weighted_rating and price.
+    """Map each cluster ID to a semantic label based on centroid rating and price.
 
-    Rating thresholds are fixed (not percentile-based) to produce interpretable, stable labels:
-      < 3.0  → Poor  |  3.0–4.5 → Average  |  ≥ 4.5 → Good
-    Price thresholds use dataset-wide 33rd/67th percentiles for relative positioning.
+    Rating thresholds:
+      < 4.0  → Bad  |  4.0–4.4 → Average  |  ≥ 4.5 → Good
+    Price thresholds (fixed NIS):
+      > 60 → Expensive  |  54–60 → Reasonable  |  < 54 → Affordable
     """
     model = result["model"]
     scaler = result["scaler"]
 
     centroids = scaler.inverse_transform(model.cluster_centers_)
     price_idx = FEATURE_COLS.index("price_nis")
-    rating_idx = FEATURE_COLS.index("weighted_rating")
-
-    price_33 = float(df["price_nis"].quantile(0.33))
-    price_67 = float(df["price_nis"].quantile(0.67))
+    rating_idx = FEATURE_COLS.index("rating")
 
     def _rating_label(r: float) -> str:
         if r >= 4.5:
             return "Good"
-        if r >= 3.0:
+        if r >= 4.0:
             return "Average"
-        return "Poor"
+        return "Bad"
 
     def _price_label(p: float) -> str:
-        if p >= price_67:
+        if p > 60:
             return "Expensive"
-        if p >= price_33:
+        if p >= 54:
             return "Reasonable"
         return "Affordable"
 

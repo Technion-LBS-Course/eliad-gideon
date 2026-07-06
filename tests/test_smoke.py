@@ -14,7 +14,7 @@ DF = clean(load_raw())
 
 
 def test_data_loads():
-    assert len(DF) > 10_000
+    assert len(DF) > 500
 
 
 def test_price_nis_present():

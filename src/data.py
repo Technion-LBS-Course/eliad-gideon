@@ -46,7 +46,13 @@ def clean(df_raw: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["price_nis"] = df.get("price_turkey_shawarma_pita", pd.NA)
+    _SHAWARMA_PRICE_COLS = [
+        "price_turkey_shawarma_pita",
+        "price_cow_shawarma_pita",
+        "price_turkey_shawarma_laffa",
+        "price_cow_shawarma_laffa",
+    ]
+    df["price_nis"] = df[_SHAWARMA_PRICE_COLS].mean(axis=1, skipna=True)
     df["ratings_count"] = df["reviews_count"].fillna(0).astype(int)
     df["car_park_nearby"] = df["car_park_nearby"].map({"True": True, "False": False})
 
