@@ -1,7 +1,7 @@
 pandas==2.2.*
-numpy==2.4.*
-scipy==1.17.*
-streamlit==1.36.*
+numpy==2.0.*
+scipy==1.13.*
+streamlit==1.38.*
 plotly==5.22.*
 scikit-learn==1.5.*
 pytest==8.2.*
