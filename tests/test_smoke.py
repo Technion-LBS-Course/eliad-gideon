@@ -1,7 +1,9 @@
 """Smoke tests — must pass on every commit."""
 import pandas as pd
 import pytest
+from src.agent import validate_params
 from src.data import clean, load_raw
+from src.geo import geocode_address, match_city
 from src.model import (
     FEATURE_COLS,
     predict,
@@ -70,3 +72,35 @@ def test_predict_empty_on_impossible_location():
     # Middle of the ocean — no venues within 0.1 km
     recs = predict(result, DF, persona="student", user_lat=0.0, user_lng=0.0, max_dist_km=0.1)
     assert recs.empty
+
+
+def test_geocode_returns_none_without_key():
+    # No key → never calls the network, never invents coordinates.
+    assert geocode_address("רחוב הרצל 1, חיפה", api_key="") is None
+    assert geocode_address("", api_key="fake") is None
+
+
+def test_match_city_exact_and_normalized():
+    cities = ["תל אביב", "חיפה", "רמת גן"]
+    assert match_city("חיפה", cities) == "חיפה"           # exact
+    assert match_city("תל אביב-יפו", cities) == "תל אביב"  # normalized contains
+    assert match_city("פריז", cities) is None             # no confident match → None
+    assert match_city(None, cities) is None
+
+
+def test_validate_params_extracts_address_never_coordinates():
+    cities = ["חיפה", "תל אביב"]
+    ok = validate_params(
+        {"address": "רחוב הרצל 45, חיפה", "city": "חיפה",
+         "max_budget_nis": 60, "quality_preference": "high", "user_type": "student"},
+        cities,
+    )
+    assert ok["address"] == "רחוב הרצל 45, חיפה"
+    assert ok["city"] == "חיפה"
+    # A city not in the dataset is dropped to None (no unsafe substring match).
+    dropped = validate_params(
+        {"address": None, "city": "פריז",
+         "max_budget_nis": 60, "quality_preference": "low", "user_type": "quality"},
+        cities,
+    )
+    assert dropped["city"] is None

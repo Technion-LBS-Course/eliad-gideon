@@ -49,7 +49,12 @@ def build_system_prompt(cities: list[str]) -> str:
         "You do NOT recommend venues, you do NOT invent names, and you do NOT compute "
         "scores — the model does all of that.\n\n"
         "Return ONLY a JSON object (no markdown fences, no prose, no trailing text) with "
-        "exactly these four keys:\n"
+        "exactly these five keys:\n"
+        '  "address": string — copy the user\'s location EXACTLY as they wrote it '
+        "(street + number + city, a neighbourhood, or a landmark), verbatim in their own "
+        "words. Do NOT translate it, do NOT normalise it, and NEVER output coordinates or "
+        "latitude/longitude — a separate geocoder resolves this text. If the user gives no "
+        "location at all, use null.\n"
         '  "city": string — the Israeli city the user is in (מיקום). Choose the closest '
         f"match from this list: [{city_list}]. Map a neighbourhood or landmark to its "
         "city. If it cannot be determined, use null.\n"
@@ -62,8 +67,9 @@ def build_system_prompt(cities: list[str]) -> str:
         'quality-seeking profiles to "quality".\n\n'
         "Rules:\n"
         "- Output strictly valid JSON with double-quoted keys and string values.\n"
-        "- Include all four keys, never more.\n"
-        "- Base every field on the user's data; do not leave fields blank."
+        "- Include all five keys, never more.\n"
+        "- Base every field on the user's data; do not invent a location the user "
+        "never mentioned — use null for address/city when they gave none."
     )
 
 
@@ -112,12 +118,20 @@ def validate_params(raw: dict | None, valid_cities: list[str]) -> dict | None:
 
     city = raw.get("city")
     city = str(city).strip() if city not in (None, "", "null") else None
-    # Keep the city only if it actually exists in the dataset; otherwise drop to fallback.
+    # Keep the city only if it actually exists in the dataset; otherwise drop it. A geocoded
+    # address (when present) is the authoritative source of location — this LLM city is only
+    # a coarse fallback for when no address is given, so require an EXACT match rather than a
+    # substring match that could silently pick the wrong city.
     if city is not None and city not in valid_cities:
-        match = next((c for c in valid_cities if c == city or city in c or c in city), None)
-        city = match  # may be None → handled by caller
+        city = None
+
+    # The raw address string (verbatim user text) — the geocoder, not this validator,
+    # decides whether it resolves. Coordinates are never accepted from the LLM.
+    address = raw.get("address")
+    address = str(address).strip() if address not in (None, "", "null") else None
 
     return {
+        "address": address,
         "city": city,
         "max_budget_nis": budget,
         "quality_preference": quality,

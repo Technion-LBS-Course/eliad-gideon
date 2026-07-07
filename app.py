@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import numpy as np
 
 from src.agent import extract_params, fallback_recommend, phrase_response, recommend
+from src.geo import geocode_address, match_city
 from src.data import load_raw, clean
 from src.model import (
     assign_cluster_labels,
@@ -852,6 +853,10 @@ with tab6:
         api_key = st.secrets.get("GROQ_API_KEY", "")
     except Exception:
         api_key = ""
+    try:
+        maps_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+    except Exception:
+        maps_key = ""
 
     st.divider()
     st.markdown("#### Step 1 — Describe yourself")
@@ -876,11 +881,26 @@ with tab6:
         if api_key and user_text.strip():
             with st.spinner("LLM reading your text and extracting parameters…"):
                 params = extract_params(user_text, api_key, cities_avail)
+
+        # Geocode the address the LLM copied (never coordinates — those come from the
+        # geocoder, ground truth). A resolved address overrides the LLM's coarse city guess
+        # and gives a real point to rank distance from.
+        geo = None
+        if params and params.get("address") and maps_key:
+            with st.spinner("Resolving your address…"):
+                geo = geocode_address(params["address"], maps_key)
+            if geo:
+                matched = match_city(geo.get("city"), cities_avail)
+                # Only filter by city when we can confidently match the geocoded city to the
+                # dataset; otherwise leave city None and let distance from the real point rank.
+                params["city"] = matched
         st.session_state["agent_params"] = params
+        st.session_state["agent_geo"] = geo
         st.session_state["agent_ran"] = True
 
     if st.session_state.get("agent_ran"):
         params = st.session_state.get("agent_params")
+        geo = st.session_state.get("agent_geo")
         df_top = pd.DataFrame()
 
         if params is not None:
@@ -890,7 +910,23 @@ with tab6:
             pc2.metric("סכום · Budget", f"₪{params['max_budget_nis']}")
             pc3.metric("איכות · Quality", params["quality_preference"])
             pc4.metric("סוג · User type", params["user_type"])
-            df_top = recommend(km_saved, df_all, params, top_n=5)
+
+            # Real coordinates from the geocoder (if the address resolved) → distance ranking.
+            user_lat = geo["lat"] if geo else None
+            user_lng = geo["lng"] if geo else None
+            if geo:
+                precision = "📍 exact" if geo.get("precise") else "≈ approximate"
+                st.caption(
+                    f"Geocoded address → **{geo.get('formatted', '')}** "
+                    f"({precision}, {geo['lat']:.4f}, {geo['lng']:.4f}). "
+                    "Coordinates come from Google's geocoder, not the LLM."
+                )
+            elif params.get("address") and maps_key:
+                st.caption(
+                    f"Couldn't geocode «{params['address']}» inside Israel — "
+                    "ranking by city only, without distance."
+                )
+            df_top = recommend(km_saved, df_all, params, user_lat, user_lng, top_n=5)
         elif api_key:
             st.warning("The LLM couldn't produce valid parameters from your text — using the city fallback.")
 
@@ -914,24 +950,30 @@ with tab6:
 
             st.markdown(f"#### 🏆 Top {len(df_top)} venues for you")
             disp = ["name", "city", "rating", "weighted_rating", "price_nis", "cluster_label", "score"]
+            # Show real distance only when the address resolved (otherwise it's a constant 0).
+            if geo and "distance_km" in df_top.columns:
+                disp.insert(5, "distance_km")
             if "google_maps_url" in df_top.columns:
                 disp.append("google_maps_url")
             out = df_top[disp].copy()
             out["weighted_rating"] = out["weighted_rating"].round(2)
+            if "distance_km" in out.columns:
+                out["distance_km"] = out["distance_km"].round(1)
             out["score"] = out["score"].round(2)
             out.index = range(1, len(out) + 1)
             st.dataframe(
                 out.rename(columns={
                     "name": "Venue", "city": "City", "rating": "Rating",
                     "weighted_rating": "Conf. ⭐", "price_nis": "Price (NIS)",
-                    "cluster_label": "Model cluster", "score": "Score",
-                    "google_maps_url": "Maps",
+                    "distance_km": "Distance", "cluster_label": "Model cluster",
+                    "score": "Score", "google_maps_url": "Maps",
                 }),
                 use_container_width=True,
                 column_config={
                     "Rating": st.column_config.NumberColumn(format="%.1f ⭐"),
                     "Conf. ⭐": st.column_config.NumberColumn(format="%.2f"),
                     "Price (NIS)": st.column_config.NumberColumn(format="₪%.0f"),
+                    "Distance": st.column_config.NumberColumn(format="%.1f km"),
                     "Maps": st.column_config.LinkColumn("Maps", display_text="Open ↗"),
                 },
             )
