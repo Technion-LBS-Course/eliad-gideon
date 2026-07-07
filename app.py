@@ -854,9 +854,9 @@ with tab6:
     except Exception:
         api_key = ""
     try:
-        maps_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
+        geo_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
     except Exception:
-        maps_key = ""
+        geo_key = ""
 
     st.divider()
     st.markdown("#### Step 1 — Describe yourself")
@@ -886,9 +886,9 @@ with tab6:
         # geocoder, ground truth). A resolved address overrides the LLM's coarse city guess
         # and gives a real point to rank distance from.
         geo = None
-        if params and params.get("address") and maps_key:
+        if params and params.get("address") and geo_key:
             with st.spinner("Resolving your address…"):
-                geo = geocode_address(params["address"], maps_key)
+                geo = geocode_address(params["address"], geo_key)
             if geo:
                 matched = match_city(geo.get("city"), cities_avail)
                 # Only filter by city when we can confidently match the geocoded city to the
@@ -919,9 +919,9 @@ with tab6:
                 st.caption(
                     f"Geocoded address → **{geo.get('formatted', '')}** "
                     f"({precision}, {geo['lat']:.4f}, {geo['lng']:.4f}). "
-                    "Coordinates come from Google's geocoder, not the LLM."
+                    "Coordinates come from the geocoder, not the LLM."
                 )
-            elif params.get("address") and maps_key:
+            elif params.get("address") and geo_key:
                 st.caption(
                     f"Couldn't geocode «{params['address']}» inside Israel — "
                     "ranking by city only, without distance."
