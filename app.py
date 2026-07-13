@@ -414,7 +414,7 @@ with tab4:
     st.markdown("""
 | Component | Definition |
 |-----------|-----------|
-| **Input X** | `[price_NIS, rating]` — raw rating + price, StandardScaler-normalized |
+| **Input X** | `[price_NIS, weighted_rating]` — confidence-weighted rating (Bayesian-smoothed by review count) + price, StandardScaler-normalized |
 | **Output y** | 9-class label: {good / average / bad} × {expensive / reasonable / affordable} |
 | **Algorithm** | K-Means · k = 9 (fixed — one cluster per target class) |
 | **Loss / Objective** | Minimize intra-cluster variance; maximize inter-cluster separation |
@@ -476,7 +476,7 @@ with tab5:
     st.caption(
         "Three fundamentally different clustering paradigms were chosen to compare how well each "
         "separates venues along the price–rating axis. "
-        "Features: `[price_nis, rating]` — StandardScaler-normalized."
+        "Features: `[price_nis, weighted_rating]` — StandardScaler-normalized."
     )
 
     a1, a2, a3 = st.columns(3)
@@ -584,11 +584,11 @@ DBSCAN's higher score (0.71) is partly because it only evaluates non-noise point
         col_truth, col_pred = st.columns(2)
         from src.model import FEATURE_COLS as _FC
 
-        df_valid = df_all.dropna(subset=["price_nis", "rating"])
+        df_valid = df_all.dropna(subset=["price_nis", "weighted_rating"])
         df_sample = df_valid.sample(min(2000, len(df_valid)), random_state=42).copy()
-        # True classes on sample
+        # True classes on sample (confidence-weighted rating — matches the model's own feature)
         score_s = np.select(
-            [df_sample["rating"] >= 4.5, df_sample["rating"] >= 4.0],
+            [df_sample["weighted_rating"] >= 4.5, df_sample["weighted_rating"] >= 4.0],
             ["good", "average"], default="bad",
         )
         price_s = np.select(
@@ -599,10 +599,10 @@ DBSCAN's higher score (0.71) is partly because it only evaluates non-noise point
 
         with col_truth:
             fig_truth = px.scatter(
-                df_sample, x="price_nis", y="rating",
+                df_sample, x="price_nis", y="weighted_rating",
                 color="target_class",
                 opacity=0.45,
-                labels={"price_nis": "Price (NIS)", "rating": "Rating", "target_class": "True Class"},
+                labels={"price_nis": "Price (NIS)", "weighted_rating": "Conf. Rating", "target_class": "True Class"},
                 title="Ground truth — 9 target classes",
                 height=380,
             )
@@ -618,10 +618,10 @@ DBSCAN's higher score (0.71) is partly because it only evaluates non-noise point
         df_sample["cluster_label"] = df_sample["cluster_id"].map(cluster_labels)
         with col_pred:
             fig_pred = px.scatter(
-                df_sample, x="price_nis", y="rating",
+                df_sample, x="price_nis", y="weighted_rating",
                 color="cluster_label",
                 opacity=0.45,
-                labels={"price_nis": "Price (NIS)", "rating": "Rating", "cluster_label": "KMeans Cluster"},
+                labels={"price_nis": "Price (NIS)", "weighted_rating": "Conf. Rating", "cluster_label": "KMeans Cluster"},
                 title="KMeans prediction — 9 clusters",
                 height=380,
             )
@@ -694,7 +694,8 @@ DBSCAN's higher score (0.71) is partly because it only evaluates non-noise point
         st.divider()
         st.markdown("#### Cluster Analysis — What Defines Each Cluster?")
         st.caption(
-            "Rating thresholds: **Good** ≥ 4.5 · **Average** 4.0–4.4 · **Bad** < 4.0 (raw rating). "
+            "Rating thresholds: **Good** ≥ 4.5 · **Average** 4.0–4.4 · **Bad** < 4.0 "
+            "(confidence-weighted rating — adjusted for review count). "
             "Price thresholds: **Expensive** > ₪60 · **Reasonable** ₪54–60 · **Affordable** < ₪54."
         )
 
@@ -924,9 +925,14 @@ with tab6:
             elif params.get("address") and geo_key:
                 st.caption(
                     f"Couldn't geocode «{params['address']}» inside Israel — "
-                    "ranking by city only, without distance."
+                    "ranking by distance from the city centre instead."
                 )
             df_top = recommend(km_saved, df_all, params, user_lat, user_lng, top_n=5)
+            if not df_top.empty and df_top.attrs.get("location_source") == "city_center":
+                st.caption(
+                    f"No exact address — using **{params['city']}**'s centre "
+                    f"({df_top.attrs['user_lat']:.4f}, {df_top.attrs['user_lng']:.4f}) as your approximate location."
+                )
         elif api_key:
             st.warning("The LLM couldn't produce valid parameters from your text — using the city fallback.")
 
@@ -950,8 +956,8 @@ with tab6:
 
             st.markdown(f"#### 🏆 Top {len(df_top)} venues for you")
             disp = ["name", "city", "rating", "weighted_rating", "price_nis", "cluster_label", "score"]
-            # Show real distance only when the address resolved (otherwise it's a constant 0).
-            if geo and "distance_km" in df_top.columns:
+            # Show real distance whenever we have a location to rank from (geocoded or city centre).
+            if df_top.attrs.get("location_source") != "none" and "distance_km" in df_top.columns:
                 disp.insert(5, "distance_km")
             if "google_maps_url" in df_top.columns:
                 disp.append("google_maps_url")
@@ -991,8 +997,24 @@ with tab6:
                     height=420,
                 )
                 fig_top_map.update_traces(marker=dict(size=14))
+
+                loc_source = df_top.attrs.get("location_source")
+                map_center = None
+                if loc_source in ("geocoded", "city_center"):
+                    u_lat, u_lng = df_top.attrs["user_lat"], df_top.attrs["user_lng"]
+                    marker_label = "📍 Your address" if loc_source == "geocoded" else "🏙️ City centre (approx.)"
+                    fig_top_map.add_scattermapbox(
+                        lat=[u_lat], lon=[u_lng],
+                        mode="markers",
+                        marker=dict(size=20, color="black"),
+                        name=marker_label,
+                        hoverinfo="name",
+                    )
+                    map_center = dict(lat=u_lat, lon=u_lng)
+
                 fig_top_map.update_layout(
                     mapbox_style="open-street-map",
+                    mapbox_center=map_center,
                     margin=dict(l=0, r=0, t=0, b=0),
                     legend=dict(orientation="h", yanchor="bottom", y=-0.15),
                 )
@@ -1016,3 +1038,29 @@ with tab6:
                         st.caption(
                             f"⭐ {row['rating']:.1f} · ₪{row['price_nis']:.0f} · {row['distance_km']:.2f} km"
                         )
+
+                st.markdown("##### 📍 Map")
+                st.caption(f"No address given — showing **{fb_city}**'s centre as your approximate location.")
+                fb_venues = pd.concat(
+                    [picks[k].assign(pick=t) for t, k in labels], ignore_index=True
+                )
+                fig_fb_map = px.scatter_mapbox(
+                    fb_venues, lat="lat", lon="lng",
+                    hover_name="name", color="pick",
+                    zoom=12, height=380,
+                )
+                fig_fb_map.update_traces(marker=dict(size=14))
+                fig_fb_map.add_scattermapbox(
+                    lat=[picks["user_lat"]], lon=[picks["user_lng"]],
+                    mode="markers",
+                    marker=dict(size=20, color="black"),
+                    name="🏙️ City centre (approx.)",
+                    hoverinfo="name",
+                )
+                fig_fb_map.update_layout(
+                    mapbox_style="open-street-map",
+                    mapbox_center=dict(lat=picks["user_lat"], lon=picks["user_lng"]),
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.2),
+                )
+                st.plotly_chart(fig_fb_map, use_container_width=True)
