@@ -15,7 +15,7 @@ ML-powered app that recommends the best shawarma venue near the user by clusteri
 - **Price-quality correlation:** Pearson r = −0.06 — effectively zero. Price does NOT predict quality.
 - **Geographic spread:** Average city price varies by ₪13.6 → city/location is a meaningful feature
 - **Price source:** 99.9% of prices are estimated (not scraped from menus) — treat as ordinal signal, not ground truth
-- **Missing reviews_count:** Most rows have NaN for `reviews_count`; `rating` is available for 96.1%
+- **reviews_count:** now populated for all 774 venues in `data/dataset.csv` (backfilled from Google review counts), so `weighted_rating` (Bayesian, confidence-weighted by review count) is a meaningful, non-constant signal — it is used as the model's quality feature (see M3 below), not just shown for reference.
 - **Coordinate columns:** Raw CSV uses `latitude`/`longitude`; `src/data.py` renames them to `lat`/`lng`
 
 ## ML Model (M3 — implemented)
@@ -28,8 +28,8 @@ ML-powered app that recommends the best shawarma venue near the user by clusteri
 | Agglomerative (ward, k=9) | Hierarchical | ~0.57 | ~0.57 | ❌ KNN fallback |
 
 - **Selected model:** KMeans — only algorithm with native `predict()` for new venues
-- **Input features:** `[price_nis, rating]` — StandardScaler-normalized. Raw `rating` is used (not the Bayesian-smoothed `weighted_rating`) because `reviews_count` is currently 100% missing in the dataset, which collapses `weighted_rating` to a single constant value with zero variance — useless as a clustering feature. `weighted_rating` is still computed and shown for reference in the EDA/Cluster Analysis tabs, but the model itself clusters on raw rating. Distance is computed at query time, not used in clustering.
-- **k is fixed at 9** — one cluster per target class: {good / average / bad} × {expensive / reasonable / affordable}. Rating bands: good ≥ 4.5, average 4.0–4.4, bad < 4.0. Price bands are fixed NIS thresholds: expensive > ₪60, reasonable ₪54–60, affordable < ₪54 (`price_nis` is the row-wise mean of the 4 shawarma price columns: turkey/cow × pita/laffa). Clusters are mapped to those 9 classes via Hungarian matching for a confusion-matrix accuracy readout, which is always a fixed 9×9 (using the full class list, not just classes observed in a given train/test split).
+- **Input features:** `[price_nis, weighted_rating]` — StandardScaler-normalized. `weighted_rating` (Bayesian-smoothed by `reviews_count`, pulling low-review-count venues toward the global mean) replaced raw `rating` as the quality feature once `reviews_count` was backfilled — raw `rating` had let a venue with 3 five-star reviews rank identically to one with 3,000. Raw `rating` is still shown alongside for reference. Distance is computed at query time, not used in clustering.
+- **k is fixed at 9** — one cluster per target class: {good / average / bad} × {expensive / reasonable / affordable}. Rating bands (on `weighted_rating`): good ≥ 4.5, average 4.0–4.4, bad < 4.0. Price bands are fixed NIS thresholds: expensive > ₪60, reasonable ₪54–60, affordable < ₪54 (`price_nis` is the row-wise mean of the 4 shawarma price columns: turkey/cow × pita/laffa). Clusters are mapped to those 9 classes via Hungarian matching for a confusion-matrix accuracy readout, which is always a fixed 9×9 (using the full class list, not just classes observed in a given train/test split).
 - **Output:** cluster label per venue + persona-weighted ranking score
 - **Success metric:** Silhouette Score ≥ 0.45 on test split + 9-class confusion-matrix accuracy. DBSCAN's silhouette is inflated (computed on non-noise points only) and it can't generalize without a KNN fallback — hence KMeans is still selected. (Benchmark numbers in the table above predate the current dataset/feature swap and should be re-measured via the Train & Compare button.)
 - **Baseline to beat:** random cluster assignment (same k=9), computed per run
@@ -42,7 +42,8 @@ The agent **wraps** the M3 model; it never invents numbers — the LLM translate
 3. **The model selects.** `recommend()` builds the user's *ideal venue* from real data quantiles and calls `model.predict()` on it; the cluster the model assigns to that ideal is the target, and the agent returns real venues the model placed in that same cluster. Persona weights only **order within** the model-chosen cluster — they never override which cluster the model picked. → **top 5**.
 4. **The LLM phrases the model's output** (`phrase_response`, `temperature=0.3`): it is handed the exact venues the model chose and may only restate them in the user's language — never invent, add, drop, or change a venue/price/rating. Rendered as a chat reply above the evidence table.
 - Groq is **OpenAI-compatible, not Anthropic** — use `client.chat.completions.create`, not `messages.create`.
-- Quality filtering uses raw `rating` (not `weighted_rating`, which collapses to the global mean for the ~95% of venues lacking a review count).
+- Quality filtering and the ideal-venue point both use `weighted_rating`, matching the model's own feature.
+- **Distance always ranks against a real point** — never a constant 0. If the LLM-extracted address geocodes, that point is used; otherwise `city_center()` (mean lat/lng of the matched city's venues) is used as a stand-in. `PERSONA_WEIGHTS[...]["distance_km"]` is negative, so farther venues score lower within the model-chosen cluster. `recommend()`/`fallback_recommend()` expose `user_lat`/`user_lng`/`location_source` (`"geocoded"` / `"city_center"` / `"none"`) so the UI can plot the assumed user location alongside the venues.
 - Key lives in `st.secrets["GROQ_API_KEY"]` via `.streamlit/secrets.toml` (git-ignored). Without a key the tab uses the city fallback only.
 
 ## File Structure
@@ -62,7 +63,7 @@ data/dataset.csv       — 12,270 clean venues (committed)
 data/kmeans_model.pkl  — trained KMeans model (committed; regenerate with Train button)
 .streamlit/secrets.toml          — GROQ_API_KEY (git-ignored; never commit)
 .streamlit/secrets.toml.example  — template (committed)
-tests/test_smoke.py    — 8 smoke tests; must all pass on every commit
+tests/test_smoke.py    — 11 smoke tests; must all pass on every commit
 notebooks/             — EDA only; no production code lives here
 ```
 

@@ -25,10 +25,10 @@ MODEL_NAME = "llama-3.3-70b-versatile"
 VALID_USER_TYPES = ("student", "quality")
 VALID_QUALITY = ("low", "medium", "high")
 
-# Quality preference (איכות) → minimum raw rating the venue must clear (hard floor).
+# Quality preference (איכות) → minimum confidence-weighted rating the venue must clear (hard floor).
 QUALITY_MIN_RATING = {"low": 0.0, "medium": 4.0, "high": 4.5}
 
-# Quality preference → which quantile of the *actual* rating distribution to use as
+# Quality preference → which quantile of the *actual* weighted_rating distribution to use as
 # the rating coordinate of the user's "ideal venue". Using a real quantile (instead of a fixed
 # 5.0) keeps the ideal point inside the populated region of feature space, so the model lands
 # on a cluster that actually contains venues.
@@ -171,6 +171,17 @@ def _with_distance(df: pd.DataFrame, user_lat, user_lng) -> pd.DataFrame:
     return df
 
 
+def city_center(df: pd.DataFrame, city: str | None) -> tuple[float, float] | None:
+    """Mean lat/lng of venues in a city — used as a stand-in user location when no
+    address was geocoded, so distance still has a real point to rank/plot against."""
+    if not city:
+        return None
+    rows = df[df["city"] == city]
+    if rows.empty:
+        return None
+    return float(rows["lat"].mean()), float(rows["lng"].mean())
+
+
 def recommend(
     model_result: dict,
     df: pd.DataFrame,
@@ -186,19 +197,31 @@ def recommend(
     predict() on it — the cluster the model assigns to that ideal is the target. We return
     real venues the model placed in the same cluster. The persona weights only order venues
     *within* the model-chosen cluster; they never override which cluster the model picked.
-    The returned frame carries .attrs['model_target_label'] / ['model_target_cluster']."""
+    Distance always ranks against a real point: the geocoded address if given, else the
+    city's centroid — never a constant 0 that would silently cancel the distance term.
+    The returned frame carries .attrs['model_target_label'] / ['model_target_cluster'] /
+    ['user_lat'] / ['user_lng'] / ['location_source']."""
     df_full = df.dropna(subset=["price_nis", "rating", "weighted_rating"]).copy()
 
     df = df_full
     if params.get("city"):
         df = df[df["city"] == params["city"]]
     df = df[df["price_nis"] <= params["max_budget_nis"]]
-    # Hard quality floor on raw rating (weighted_rating collapses to the global mean for the
-    # ~95% of venues lacking a review count, so it can't discriminate quality; rating can).
+    # Hard quality floor on the confidence-weighted rating — venues with few reviews get
+    # pulled toward the global mean, so a handful of 5-star reviews can't fake "high quality".
     min_rating = QUALITY_MIN_RATING.get(params["quality_preference"], 0.0)
-    df = df[df["rating"] >= min_rating].copy()
+    df = df[df["weighted_rating"] >= min_rating].copy()
     if df.empty:
         return df
+
+    location_source = "none"
+    if user_lat is not None and user_lng is not None:
+        location_source = "geocoded"
+    elif params.get("city"):
+        center = city_center(df_full, params["city"])
+        if center is not None:
+            user_lat, user_lng = center
+            location_source = "city_center"
 
     df = _with_distance(df, user_lat, user_lng)
 
@@ -206,7 +229,7 @@ def recommend(
     scaler, model = model_result["scaler"], model_result["model"]
     df["cluster"] = model.predict(scaler.transform(df[FEATURE_COLS].fillna(0)))
 
-    # Build the user's ideal venue in FEATURE_COLS order [price_nis, rating] and ask
+    # Build the user's ideal venue in FEATURE_COLS order [price_nis, weighted_rating] and ask
     # the MODEL which cluster it belongs to. Both coordinates are real quantiles of the
     # candidate pool, so the ideal always lands in populated feature space (never an empty
     # cluster). Students anchor to the cheap end; others to the median price (price and quality
@@ -215,7 +238,7 @@ def recommend(
     price_q = 0.15 if params["user_type"] == "student" else 0.50
     ideal_price = float(df["price_nis"].quantile(price_q))
     rating_q = QUALITY_RATING_QUANTILE.get(params["quality_preference"], 0.55)
-    ideal_rating = float(df["rating"].quantile(rating_q))
+    ideal_rating = float(df["weighted_rating"].quantile(rating_q))
     ideal = pd.DataFrame([[ideal_price, ideal_rating]], columns=FEATURE_COLS)
     target_cluster = int(model.predict(scaler.transform(ideal))[0])
 
@@ -224,9 +247,11 @@ def recommend(
     df["cluster_label"] = df["cluster"].map(labels)
 
     # Persona-weighted ordering — used ONLY to rank within the model's chosen cluster.
+    # distance_km carries a real value now (geocoded point or city centroid), so its negative
+    # weight actually discounts farther venues instead of being a no-op constant.
     w = PERSONA_WEIGHTS.get(params["user_type"], PERSONA_WEIGHTS["student"])
     df["score"] = (
-        w["rating"] * df["rating"]
+        w["rating"] * df["weighted_rating"]
         + w["price_nis"] * df["price_nis"] / 10
         + w["distance_km"] * df["distance_km"]
     )
@@ -244,6 +269,9 @@ def recommend(
     result.attrs["model_target_cluster"] = target_cluster
     result.attrs["model_target_label"] = labels.get(target_cluster, str(target_cluster))
     result.attrs["model_cluster_n"] = int((df["cluster"] == target_cluster).sum())
+    result.attrs["user_lat"] = user_lat
+    result.attrs["user_lng"] = user_lng
+    result.attrs["location_source"] = location_source
     return result
 
 
@@ -252,7 +280,7 @@ def fallback_recommend(
     city: str,
     user_lat: float | None = None,
     user_lng: float | None = None,
-) -> dict[str, pd.DataFrame]:
+) -> dict:
     """Step 3 fallback: when the LLM output is unusable we ask only for the city and
     return three safe picks — best (איכות), cheapest (סכום), closest (מיקום)."""
     pool = df.dropna(subset=["price_nis", "rating", "weighted_rating"]).copy()
@@ -261,14 +289,18 @@ def fallback_recommend(
         return {}
 
     # If no GPS, measure "closest" against the city's own centroid as a sensible proxy.
+    location_source = "geocoded" if user_lat is not None else "city_center"
     lat = user_lat if user_lat is not None else float(pool["lat"].mean())
     lng = user_lng if user_lng is not None else float(pool["lng"].mean())
     pool = _with_distance(pool, lat, lng)
 
     return {
-        "best": pool.sort_values("rating", ascending=False).head(1).reset_index(drop=True),
+        "best": pool.sort_values("weighted_rating", ascending=False).head(1).reset_index(drop=True),
         "cheapest": pool.sort_values("price_nis", ascending=True).head(1).reset_index(drop=True),
         "closest": pool.sort_values("distance_km", ascending=True).head(1).reset_index(drop=True),
+        "user_lat": lat,
+        "user_lng": lng,
+        "location_source": location_source,
     }
 
 

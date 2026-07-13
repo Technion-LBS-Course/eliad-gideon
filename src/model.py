@@ -14,9 +14,11 @@ from sklearn.metrics import confusion_matrix as _sk_cm
 from sklearn.preprocessing import StandardScaler
 from scipy.optimize import linear_sum_assignment
 
-FEATURE_COLS = ["price_nis", "rating"]
+FEATURE_COLS = ["price_nis", "weighted_rating"]
 MODEL_PATH = Path(__file__).parent.parent / "data" / "kmeans_model.pkl"
 
+# "rating" key here names the quality dimension of the score, not the raw column —
+# it's applied to weighted_rating, so venues with few reviews are pulled toward the mean.
 PERSONA_WEIGHTS = {
     "student": {"price_nis": -1.5, "rating": 1.0, "distance_km": -0.8},
     "quality": {"price_nis": -0.5, "rating": 2.0, "distance_km": -0.5},
@@ -39,7 +41,7 @@ TARGET_CLASSES = [
 
 def split_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """80/20 train/test split on venues with valid price and rating."""
-    df_valid = df.dropna(subset=["rating", "price_nis"]).copy()
+    df_valid = df.dropna(subset=["weighted_rating", "price_nis"]).copy()
     df_train, df_test = train_test_split(df_valid, test_size=0.20, random_state=42)
     return df_train.reset_index(drop=True), df_test.reset_index(drop=True)
 
@@ -193,14 +195,15 @@ def compare_algorithms(df: pd.DataFrame) -> tuple[dict, dict, dict, pd.DataFrame
 def _add_target_class(df_train: pd.DataFrame, df_test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Add 9-class target_class column to both splits.
 
-    Rating: good >= 4.5 stars, average 4.0-4.4, bad < 4.0.
+    Rating: good >= 4.5 stars, average 4.0-4.4, bad < 4.0 (confidence-weighted rating,
+    so the ground-truth class reflects review-count-adjusted quality, same as the model's feature).
     Price: fixed NIS thresholds — expensive > 60, reasonable 54-60, affordable < 54.
     """
 
     def _label(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         score = np.select(
-            [df["rating"] >= 4.5, df["rating"] >= 4.0],
+            [df["weighted_rating"] >= 4.5, df["weighted_rating"] >= 4.0],
             ["good", "average"],
             default="bad",
         )
@@ -259,9 +262,9 @@ def compute_confusion_matrix(result: dict, df_train: pd.DataFrame, df_test: pd.D
     }
 
 def assign_cluster_labels(result: dict, df: pd.DataFrame) -> dict[int, str]:
-    """Map each cluster ID to a semantic label based on centroid rating and price.
+    """Map each cluster ID to a semantic label based on centroid confidence-weighted rating and price.
 
-    Rating thresholds:
+    Rating thresholds (weighted_rating — review-count-adjusted):
       < 4.0  → Bad  |  4.0–4.4 → Average  |  ≥ 4.5 → Good
     Price thresholds (fixed NIS):
       > 60 → Expensive  |  54–60 → Reasonable  |  < 54 → Affordable
@@ -271,7 +274,7 @@ def assign_cluster_labels(result: dict, df: pd.DataFrame) -> dict[int, str]:
 
     centroids = scaler.inverse_transform(model.cluster_centers_)
     price_idx = FEATURE_COLS.index("price_nis")
-    rating_idx = FEATURE_COLS.index("rating")
+    rating_idx = FEATURE_COLS.index("weighted_rating")
 
     def _rating_label(r: float) -> str:
         if r >= 4.5:
@@ -332,7 +335,7 @@ def predict(
     df["distance_km"] = df.apply(
         lambda r: _haversine(user_lat, user_lng, r["lat"], r["lng"]), axis=1
     )
-    df = df[df["distance_km"] <= max_dist_km].dropna(subset=["price_nis", "rating"])
+    df = df[df["distance_km"] <= max_dist_km].dropna(subset=["price_nis", "weighted_rating"])
     if df.empty:
         return df
 
@@ -341,7 +344,7 @@ def predict(
 
     w = PERSONA_WEIGHTS.get(persona, PERSONA_WEIGHTS["student"])
     df["score"] = (
-        w["rating"] * df["rating"]
+        w["rating"] * df["weighted_rating"]
         + w["price_nis"] * df["price_nis"] / 10
         + w["distance_km"] * df["distance_km"]
     )
