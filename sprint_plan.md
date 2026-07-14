@@ -29,7 +29,7 @@
 - [x] Implement persona-weighted ranking score (student / quality personas)
 - [x] Add 🔮 Predicted tab: Train & Compare → KPI table → confusion matrix → per-cluster deep-dive
 - [x] Save/load model via `data/kmeans_model.pkl`
-- [x] Write `tests/test_smoke.py` (8 tests, all passing)
+- [x] Write `tests/test_core.py` (all passing)
 - [x] Merge `Eliad` branch into `main`
 
 ## M4 · Agent Layer (model → agent, input layer) ✅ (completed — 2026-06-30)

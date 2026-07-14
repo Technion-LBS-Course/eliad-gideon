@@ -63,7 +63,7 @@ data/dataset.csv       — 12,270 clean venues (committed)
 data/kmeans_model.pkl  — trained KMeans model (committed; regenerate with Train button)
 .streamlit/secrets.toml          — GROQ_API_KEY (git-ignored; never commit)
 .streamlit/secrets.toml.example  — template (committed)
-tests/test_smoke.py    — 11 smoke tests; must all pass on every commit
+tests/test_core.py     — core tests; must all pass on every commit
 notebooks/             — EDA only; no production code lives here
 ```
 

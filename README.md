@@ -171,7 +171,7 @@ src/
                               recommend() [model picks cluster → top-5, plotted on a map],
                               fallback_recommend(), phrase_response() [LLM restates the model's picks]
 tests/
-└── test_smoke.py           — 8 smoke tests (all must pass on every commit)
+└── test_core.py            — core tests (all must pass on every commit)
 notebooks/
 └── 01_eda.ipynb            — Exploratory analysis
 .gitignore
