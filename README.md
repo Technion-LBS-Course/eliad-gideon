@@ -1,6 +1,8 @@
 # Appetite Engineering — הנדסת התיאבון
 **Real-time shawarma navigation: ML-powered recommendations that balance quality, price, and distance in a single tap.**
 
+🔗 **Live demo:** https://eliad-gideon-mtdncgta6rxpxbrig6dtjx.streamlit.app/
+
 > **KPI:** Silhouette Score ≥ 0.45 on the held-out venue set — the only objective measure of cluster quality when there are no ground-truth labels.
 
 ---
