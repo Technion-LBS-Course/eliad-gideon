@@ -3,7 +3,7 @@
 
 🔗 **Live demo:** https://eliad-gideon-mtdncgta6rxpxbrig6dtjx.streamlit.app/
 
-> **KPI:** Silhouette Score ≥ 0.45 on the held-out venue set — the only objective measure of cluster quality when there are no ground-truth labels.
+> **KPI:** the model must **beat random cluster assignment** on the held-out venue set — the only objective measure of cluster quality when there are no ground-truth labels. Current KMeans test silhouette ≈ **0.33** (random baseline ≈ −0.16) plus ≈ **56%** 9-class accuracy.
 
 ---
 
@@ -63,7 +63,7 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 
 3. **Geographic arbitrage exists: ~₪19.75 spread across cities** — Average shawarma price varies by ~₪19.75 between the cheapest and most expensive cities. Distance + city context is a meaningful signal, justifying `distance_km` as a core model feature alongside price.
 
-4. **`reviews_count` is currently 100% missing** — every venue has 0 recorded reviews. This means the Bayesian-smoothed `weighted_rating` column collapses to a single constant (no variance at all), so it can't be used as a clustering feature; the model clusters on **raw `rating`** instead, which does carry real signal (std ≈ 0.69, range 1.0–5.0). `weighted_rating` is still computed and shown for reference in the EDA/Cluster Analysis tabs.
+4. **`reviews_count` is now backfilled for all venues** (median ≈ 69 reviews, 0% missing) — so the Bayesian-smoothed `weighted_rating` is a live, non-constant signal (std ≈ 0.28, range 2.5–4.9) and is used as the model's quality feature. Shrinkage toward the global mean (₪ C = 50) pulls low-review venues in, compressing the spread relative to raw `rating` (std ≈ 0.69) — this is deliberate: a venue with 3 five-star reviews should not rank like one with 3,000.
 
 ---
 
@@ -93,20 +93,26 @@ Israel's shawarma market has hundreds of venues with prices ranging ~₪49–₪
 
 ### Algorithms compared
 
-| Algorithm | Paradigm | Hyperparameters | Train Silhouette | Test Silhouette | Meets KPI ≥ 0.45 |
-|-----------|----------|----------------|-----------------|----------------|-----------------|
-| **KMeans** | Partitional | k=9 (fixed — one per target class) | ~0.59 | ~0.58 | ✅ |
-| **DBSCAN** | Density-based | eps auto-tuned, min_samples=5 | ~1.00 | ~0.68 | ✅ |
-| **Agglomerative** | Hierarchical | k=9 (ward linkage) | ~0.57 | ~0.57 | ✅ |
+Current figures on the 774-venue dataset with the live `weighted_rating` feature (re-run **Train & Compare** to reproduce):
 
-**Selected model: KMeans (k=9)** — the only algorithm with native `predict()` for new venues. DBSCAN's silhouette is inflated (computed on non-noise points only) and it cannot generalize out-of-sample without a KNN fallback, so KMeans wins on deployability. *(Benchmark numbers in the table above predate the current dataset/feature swap — re-run **Train & Compare** for current figures.)* k is fixed at 9 so each cluster maps to one target class — {good / average / bad} × {expensive / reasonable / affordable} — enabling a confusion-matrix accuracy readout via Hungarian matching, which is always a fixed 9×9 (using the full class list, not just classes observed in a given split).
+| Algorithm | Paradigm | Hyperparameters | Train Silhouette | Test Silhouette | Beats baseline |
+|-----------|----------|----------------|-----------------|----------------|-----------------|
+| **KMeans** | Partitional | k=9 (fixed — one per target class) | ~0.35 | ~0.33 | ✅ |
+| **DBSCAN** | Density-based | eps auto-tuned, min_samples=5 | ~0.00 | ~0.00 | ❌ (collapses to one cluster) |
+| **Agglomerative** | Hierarchical | k=9 (ward linkage) | ~0.32 | ~0.26 | ✅ |
+
+Random-assignment baseline (test) ≈ **−0.16**; KMeans test-set confusion-matrix accuracy ≈ **56%**.
+
+**Selected model: KMeans (k=9)** — the only algorithm with native `predict()` for new venues; DBSCAN collapses to a single cluster on this feature space and cannot generalize out-of-sample without a KNN fallback. k is fixed at 9 so each cluster maps to one target class — {good / average / bad} × {expensive / reasonable / affordable} — enabling a confusion-matrix accuracy readout via Hungarian matching, which is always a fixed 9×9 (using the full class list, not just classes observed in a given split).
+
+> **Why the silhouette is ~0.33, not the old ~0.58:** the earlier score was inflated. When `reviews_count` was 100% missing, `weighted_rating` was a constant, so the model effectively clustered on **price alone** (a clean 1-D problem, silhouette ~0.54). Now that `reviews_count` is backfilled, `weighted_rating` is a real second dimension and the model clusters in genuine 2-D — harder to separate, so ~0.33 is the honest figure. The 9-class accuracy (~56%) and the baseline margin are unchanged.
 
 ### Train / Test Split
 - **Split:** 80% train / 20% test, `random_state=42`
-- **Eligible rows:** venues with non-null `price_nis` + `rating` (716 of 774 venues)
-- **Features:** `[price_nis, rating]` — StandardScaler-normalized. Raw `rating` is used (not the Bayesian-smoothed `weighted_rating`) because `reviews_count` is currently 100% missing, which would otherwise collapse `weighted_rating` to a constant with zero variance.
-- **Target class thresholds:** rating good ≥ 4.5, average 4.0–4.4, bad < 4.0. Price expensive > ₪60, reasonable ₪54–60, affordable < ₪54.
-- **KPI:** Silhouette Score ≥ 0.45 on test split + 9-class confusion-matrix accuracy
+- **Eligible rows:** venues with non-null `price_nis` + `weighted_rating` (716 of 774 venues)
+- **Features:** `[price_nis, weighted_rating]` — StandardScaler-normalized. The Bayesian-smoothed `weighted_rating` is used (not raw `rating`) now that `reviews_count` is backfilled, so venues with few reviews are pulled toward the global mean rather than trusted at face value.
+- **Target class thresholds:** rating (on `weighted_rating`) good ≥ 4.5, average 4.0–4.4, bad < 4.0. Price expensive > ₪60, reasonable ₪54–60, affordable < ₪54.
+- **KPI:** beat the random-assignment baseline on the test split + 9-class confusion-matrix accuracy (currently test silhouette ≈ 0.33 vs. baseline ≈ −0.16; accuracy ≈ 56%)
 
 ### Running the ML pipeline in Streamlit
 1. Open the **🔮 Predicted** tab

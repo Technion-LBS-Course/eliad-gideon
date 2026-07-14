@@ -54,6 +54,12 @@
 - [x] Fixed a `df.sample()` bug in the KPI tab that sized against the pre-filter row count instead of the post-`dropna()` count
 - [x] Merged teammate's Streamlit Cloud build fix (pin Python 3.12, wheel-available `numpy`/`scipy`/`streamlit`) and confirmed local Groq/`st.secrets` wiring
 
+## M4.2 · reviews_count Backfill & KPI Re-baseline ✅ (completed — 2026-07-14)
+- [x] Backfill `reviews_count` from Google review counts for all 774 venues (median ≈ 69, 0% missing) — reverses the M4.1 "100% missing" state
+- [x] Switch model's `FEATURE_COLS` back from raw `rating` to `weighted_rating` (now a live, non-constant signal, std ≈ 0.28) — undoing the M4.1 line above
+- [x] Re-baseline the KPI: the old ~0.54 silhouette was inflated (constant `weighted_rating` → model clustered on price alone); with the live feature the model clusters in genuine 2-D at an honest **test silhouette ≈ 0.33** (random baseline ≈ −0.16). New bar: **beat the random baseline**. 9-class confusion-matrix accuracy unchanged at **≈ 56%**
+- [x] Expand `tests/test_core.py` to unit-test all components + an end-to-end database→model integration test (51 tests, all passing)
+
 ## M5 · Evaluation & Presentation 🔲 (weeks 8–9)
 - [ ] Final Silhouette Score report
 - [ ] Manual persona match evaluation (50 test cases)

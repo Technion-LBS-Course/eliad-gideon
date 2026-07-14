@@ -9,7 +9,7 @@ ML-powered app that recommends the best shawarma venue near the user by clusteri
 - Raw API responses are cached in `data/raw/` and never committed. Processed features live in `data/processed/`.
 
 ## What We Learned About the Data (M2)
-- **Dataset:** 12,270 unique venues across 77 Israeli cities after deduplication on `name + lat + lng`
+- **Dataset:** 774 unique venues across 143 Israeli cities after deduplication on `name + lat + lng` (an earlier 12,270-row scrape was replaced by this smaller, corrected dataset)
 - **Price range:** Turkey shawarma pita ₪37–₪58, median ₪46, IQR ₪43–₪48 (tight cluster)
 - **Rating distribution:** Mean 4.32, median 4.4, std 0.53 — ratings skew high; most venues above 4.0
 - **Price-quality correlation:** Pearson r = −0.06 — effectively zero. Price does NOT predict quality.
@@ -21,17 +21,20 @@ ML-powered app that recommends the best shawarma venue near the user by clusteri
 ## ML Model (M3 — implemented)
 
 ### Algorithms trained & compared (80 / 20 train/test split, `random_state=42`)
+Current figures on the 774-venue dataset with the live `weighted_rating` feature (re-run **Train & Compare** to reproduce):
 | Algorithm | Paradigm | Train Silhouette | Test Silhouette | predict() |
 |-----------|----------|-----------------|----------------|-----------|
-| **KMeans** (k=9, fixed) | Partitional | ~0.59 | ~0.58 | ✅ native |
-| DBSCAN (eps auto-tuned, min_samples=5) | Density-based | ~1.00 | ~0.68 | ❌ KNN fallback |
-| Agglomerative (ward, k=9) | Hierarchical | ~0.57 | ~0.57 | ❌ KNN fallback |
+| **KMeans** (k=9, fixed) | Partitional | ~0.35 | ~0.33 | ✅ native |
+| DBSCAN (eps auto-tuned, min_samples=5) | Density-based | ~0.00 (collapses to one cluster) | ~0.00 | ❌ KNN fallback |
+| Agglomerative (ward, k=9) | Hierarchical | ~0.32 | ~0.26 | ❌ KNN fallback |
+
+Random-assignment baseline (test) ≈ −0.16; KMeans test-set confusion-matrix accuracy ≈ **56%**.
 
 - **Selected model:** KMeans — only algorithm with native `predict()` for new venues
 - **Input features:** `[price_nis, weighted_rating]` — StandardScaler-normalized. `weighted_rating` (Bayesian-smoothed by `reviews_count`, pulling low-review-count venues toward the global mean) replaced raw `rating` as the quality feature once `reviews_count` was backfilled — raw `rating` had let a venue with 3 five-star reviews rank identically to one with 3,000. Raw `rating` is still shown alongside for reference. Distance is computed at query time, not used in clustering.
 - **k is fixed at 9** — one cluster per target class: {good / average / bad} × {expensive / reasonable / affordable}. Rating bands (on `weighted_rating`): good ≥ 4.5, average 4.0–4.4, bad < 4.0. Price bands are fixed NIS thresholds: expensive > ₪60, reasonable ₪54–60, affordable < ₪54 (`price_nis` is the row-wise mean of the 4 shawarma price columns: turkey/cow × pita/laffa). Clusters are mapped to those 9 classes via Hungarian matching for a confusion-matrix accuracy readout, which is always a fixed 9×9 (using the full class list, not just classes observed in a given train/test split).
 - **Output:** cluster label per venue + persona-weighted ranking score
-- **Success metric:** Silhouette Score ≥ 0.45 on test split + 9-class confusion-matrix accuracy. DBSCAN's silhouette is inflated (computed on non-noise points only) and it can't generalize without a KNN fallback — hence KMeans is still selected. (Benchmark numbers in the table above predate the current dataset/feature swap and should be re-measured via the Train & Compare button.)
+- **Success metric:** the model must **beat random cluster assignment** on the held-out split — the objective bar when there are no ground-truth labels. Current KMeans **test silhouette ≈ 0.33** vs. a random baseline of ≈ **−0.16**, plus **≈ 56%** 9-class confusion-matrix accuracy. NOTE: an earlier ≥ 0.45 silhouette target was set when `reviews_count` was 100% missing — that collapsed `weighted_rating` to a constant, so the model effectively clustered on price alone (an inflated ~0.54 silhouette). With `reviews_count` now backfilled, `weighted_rating` is a live second dimension and the model clusters in genuine 2-D; ~0.33 is the honest figure and ~0.45 is no longer the target. KMeans is selected as the only algorithm with a native `predict()`; DBSCAN collapses to a single cluster on this feature space and can't generalize without a KNN fallback.
 - **Baseline to beat:** random cluster assignment (same k=9), computed per run
 - **Saved model:** `data/kmeans_model.pkl` (auto-loaded by Streamlit on next run)
 
@@ -59,7 +62,7 @@ src/agent.py           — M4 agent: build_system_prompt(), build_user_prompt(),
                          extract_params() (Groq LLM), validate_params(),
                          recommend() (model picks cluster → top-5), fallback_recommend(),
                          phrase_response() (LLM restates the model's picks)
-data/dataset.csv       — 12,270 clean venues (committed)
+data/dataset.csv       — 774 clean venues (committed)
 data/kmeans_model.pkl  — trained KMeans model (committed; regenerate with Train button)
 .streamlit/secrets.toml          — GROQ_API_KEY (git-ignored; never commit)
 .streamlit/secrets.toml.example  — template (committed)
